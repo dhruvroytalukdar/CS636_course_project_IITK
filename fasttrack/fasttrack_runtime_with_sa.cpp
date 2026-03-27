@@ -9,7 +9,6 @@
 #define SHADOW_SIZE  (1 << 20)
 #define SHADOW_MASK  (SHADOW_SIZE - 1)
 
-
 typedef unsigned long long Epoch;
 
 const Epoch READ_SHARED = (Epoch)-1;
