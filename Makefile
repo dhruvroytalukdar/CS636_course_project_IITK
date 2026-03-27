@@ -5,8 +5,8 @@ LLVM_CXXFLAGS = $(shell llvm-config --cxxflags)
 LLVM_LDFLAGS = $(shell llvm-config --ldflags)
 
 # File names
-PASS_SRC = InstrumentMemory.cpp
-PASS_OBJ = InstrumentMemoryPass.so
+PASS_SRC = wcp_instrumentation.cpp
+PASS_OBJ = wcp_instpass.so
 RUNTIME_SRC = wcp_runtime.cpp
 RUNTIME_OBJ = wcp_runtime.o
 TARGET_SRC = target.cpp
