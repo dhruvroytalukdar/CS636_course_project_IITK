@@ -9,6 +9,9 @@ using namespace llvm;
 namespace {
 // Define the pass
 struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
+unsigned long num_loads;
+unsigned long num_stores;
+
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
         LLVMContext &Ctx = M.getContext();
         const DataLayout &DL = M.getDataLayout();
@@ -53,16 +56,17 @@ struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
 
                     // ---------------- LOAD ----------------
                     if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                        num_loads++;
                         IRBuilder<> B(&I); // Insert before the load
     
                         // 1. Get the IR Instruction as a std::string
                         std::string Str;
                         raw_string_ostream RSO(Str);
                         I.print(RSO); // Dump instruction to stream
-                        
+                         
                         // 2. Create a Global String Constant in the module
                         // This returns a Value* (Constant*) pointing to the string
-                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
 
                         // 3. Pass it to the runtime
                         B.CreateCall(FtRead, {LI->getPointerOperand(), IrStringPtr});
@@ -72,12 +76,13 @@ struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
 
                     // ---------------- STORE ----------------
                     if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                        num_stores++;
                         IRBuilder<> B(&I);
                         std::string Str;
                         raw_string_ostream RSO(Str);
                         I.print(RSO);
                         
-                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
 
                         B.CreateCall(FtWrite, {SI->getPointerOperand(), IrStringPtr});
                         continue;
@@ -172,6 +177,8 @@ struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
                 }
             }
         }
+        errs() << "loads = " << num_loads << "\n";
+        errs() << "stores = " << num_stores << "\n";
 
         return PreservedAnalyses::none();
     }
