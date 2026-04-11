@@ -40,7 +40,40 @@ $(FINAL_EXEC): $(INSTRUMENTED_IR) $(RUNTIME_OBJ)
 run: $(FINAL_EXEC)
 	./$(FINAL_EXEC)
 
+
 clean:
 	rm -f *.so *.o *.ll
 
-.PHONY: all clean
+	# ... (Previous variable definitions for CXX, OPT, LLVM_CXXFLAGS, etc. remain the same)
+
+# New variables for Escape Analysis
+ESCAPE_PASS_SRC = escape_instrumentation.cpp
+ESCAPE_PASS_OBJ = escape_instpass.so
+BUILD_DIR = build
+ESCAPE_IR = $(BUILD_DIR)/instrumented_escape.ll
+ESCAPE_EXEC = $(BUILD_DIR)/instrumented_escape
+
+# Updated Phony targets
+.PHONY: all clean run instrument_escape
+
+# ... (Previous rules for PASS_OBJ, RUNTIME_OBJ, TARGET_IR remain the same)
+
+# 1. Compile the Escape Analysis LLVM Pass
+$(ESCAPE_PASS_OBJ): $(ESCAPE_PASS_SRC)
+	$(CXX) -O3 -shared -fPIC $(LLVM_CXXFLAGS) $(LLVM_LDFLAGS) $< -o $@
+
+# 2. Run Escape Analysis Pass and output to build directory
+$(ESCAPE_IR): $(TARGET_IR) $(ESCAPE_PASS_OBJ)
+	mkdir -p $(BUILD_DIR)
+	$(OPT) -load-pass-plugin=./$(ESCAPE_PASS_OBJ) -passes="shared-ptr-analysis" $< -S -o $@
+
+# 3. Link the Instrumented IR with the Runtime and place the binary in build/
+$(ESCAPE_EXEC): $(ESCAPE_IR) $(RUNTIME_OBJ)
+	$(CXX) $^ -o $@
+
+# 4. Master target for Escape Instrumentation
+instrument_escape: $(ESCAPE_EXEC)
+
+# Updated clean rule to remove build directory
+clean:
+	rm -rf *.so *.o *.ll $(BUILD_DIR)
