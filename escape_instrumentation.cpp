@@ -21,15 +21,32 @@
 #include "llvm/IR/InstrTypes.h" 
 using namespace llvm;
 
+/*TODO : right now the analysis generates some false negatives in some non trivial cases
+ * the root creation, direct string comparision may fail if pthread_create called some other way.
+ * but the root creation step is sound and conservative.
+ * the issue is in the pointer assignment graph or PAG. i only considered common cases like loads, stores, 
+ * return instruction. but loads, stores are not the only way memory is accessed, memcpy is one way and llvm dont
+ * immediately translates it to loads and stores, it uses a instrinsic llvm.memcpy 
+ * the PAG ignores pointer derivations, suppose a struct pointer is passed to pthread_create if the code offsets the struct
+ * to access a filed then llvm creates a new value or pointer, the analysis misses this case. 
+ * how llvm computes address for struct fields and array indices  ?
+ * casting a pointer also creates a new SSA register, missed case ? how llvm cast pointers ? 
+ * there is also something called phi instruction. idk about that . 
+ * also loads and stores not the only way to access memory again, atomic laods, stores maybe generates different instructions ??
+ * not consider them, assume only loads and stores, maybe expand later. 
+ *
+ *
+ *
+ */
+
 namespace {
 
-// Define the Pass using the New Pass Manager mixin
 struct SharedPointerAnalysisPass : public PassInfoMixin<SharedPointerAnalysisPass> {
     
-    // 1. Maintain a set 'sharedset'
+    //maintain a set 'sharedset'
     SmallPtrSet<Value *, 32> SharedSet;
     SmallVector<Instruction*, 32> insturment; 
-    // 2. Dependency graph representing A -> B (A stored into B)
+    //Dependency graph representing A -> B (A stored into B)
     DenseMap<Value *, SmallPtrSet<Value *, 8>> DependencyGraph;
 
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
@@ -154,6 +171,17 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                         DependencyGraph[P].insert(Load);
                     }
                 }
+                // 3. GET ELEMENT PTR (Struct/Array field access)
+                else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+                    Value *BasePtr = GEP->getPointerOperand();
+                    DependencyGraph[BasePtr].insert(GEP); // If base escapes, derived pointer escapes
+                }
+                // 4. CASTS (BitCast, AddrSpaceCast)
+                else if (auto *Cast = dyn_cast<CastInst>(&I)) {
+                    if (Cast->getType()->isPointerTy() && Cast->getOperand(0)->getType()->isPointerTy()) {
+                        DependencyGraph[Cast->getOperand(0)].insert(Cast); // If original escapes, casted escapes
+                    }
+                }
                 
                 // 3. CALLS: Inter-procedural flow (TODO 5)
                 else if (auto *Call = dyn_cast<CallInst>(&I)) {
@@ -209,12 +237,12 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                             }
                         }
                         
-                        // Map Callee Return Values back to the Call Site SSA variable
+                        //Map Callee Return Values back to the Call Site SSA variable
                         if (Call->getType()->isPointerTy()) {
                             for (BasicBlock &CBB : *Callee) {
                                 if (auto *Ret = dyn_cast<ReturnInst>(CBB.getTerminator())) {
                                     if (Value *RetVal = Ret->getReturnValue()) {
-                                        // If the return value inside the callee is shared, the CallInst is shared
+                                        //If the return value inside the callee is shared, the CallInst is shared
                                         DependencyGraph[RetVal].insert(Call);
                                     }
                                 }
