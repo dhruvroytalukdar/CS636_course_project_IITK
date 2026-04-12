@@ -182,8 +182,23 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                         DependencyGraph[Cast->getOperand(0)].insert(Cast); // If original escapes, casted escapes
                     }
                 }
-                
-                // 3. CALLS: Inter-procedural flow (TODO 5)
+                    // 5. PHI NODES (Control Flow Merges)
+                else if (auto *PHI = dyn_cast<PHINode>(&I)) {
+                    if (PHI->getType()->isPointerTy()) {
+                        for (Value *IncValue : PHI->incoming_values()) {
+                            DependencyGraph[IncValue].insert(PHI); // If any incoming escapes, the PHI escapes
+                        }
+                    }
+                }
+                // 6. SELECT INST (Ternary operators)
+                else if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+                    if (Sel->getType()->isPointerTy()) {
+                        DependencyGraph[Sel->getTrueValue()].insert(Sel);
+                        DependencyGraph[Sel->getFalseValue()].insert(Sel);
+                    }
+                }
+                    
+                // 7. CALLS: Inter-procedural flow (TODO 5)
                 else if (auto *Call = dyn_cast<CallInst>(&I)) {
                     //get the function you are calling, currently we are only at a call instruction.
                     Function *Callee = Call->getCalledFunction();
