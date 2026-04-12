@@ -129,18 +129,14 @@ struct SharedPointerAnalysisPass : public PassInfoMixin<SharedPointerAnalysisPas
             if(F.isDeclaration())continue;
             instrumentSharedAccesses(F, FAM, M);
         }
-        // Output the results for verification during compilation
         printAnalysisResults();
 
-        // This is strictly an analysis pass; it does not mutate the IR.
         return PreservedAnalyses::none();
     }
 void runInterproceduralEscapeAnalysis(Module &M) {
     // DependencyGraph maps a Value to all Values that inherit its "Shared" status
     DenseMap<Value *, SmallPtrSet<Value *, 8>> DependencyGraph;
-    // ========================================================================
-    // TODO 3 & 5: Build the Global Pointer Assignment Graph
-    // ========================================================================
+    //Build the Global Pointer Assignment Graph
     for (Function &F : M) {
         for (BasicBlock &BB : F) {
             for (Instruction &I : BB) {
@@ -201,14 +197,39 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                 // 7. CALLS: Inter-procedural flow (TODO 5)
                 else if (auto *Call = dyn_cast<CallInst>(&I)) {
                     //get the function you are calling, currently we are only at a call instruction.
+                    Value *Callee2 = Call->getCalledOperand()->stripPointerCasts();
+
+                    if (Function *CalledFn = dyn_cast<Function>(Callee2)) {
+                        if (CalledFn->getName() == "pthread_create") {
+
+                            // Extract the thread start function (Operand 2)
+                            Value *ThreadFuncVal = Call->getArgOperand(2)->stripPointerCasts();
+
+                            if (Function *ThreadFunc = dyn_cast<Function>(ThreadFuncVal)) {
+
+                                // 1. Get the actual data pointer passed to the thread (Operand 3)
+                                Value *ActualDataArg = Call->getArgOperand(3);
+
+                                // 2. A thread function always has exactly one formal argument: void* arg
+                                // We extract that formal argument directly from the ThreadFunc
+                                if (!ThreadFunc->arg_empty()) {
+                                    Argument *FormalDataArg = ThreadFunc->getArg(0);
+
+                                    // 3. CREATE THE INTER-PROCEDURAL EDGE
+                                    // If the data passed to pthread_create is marked as Shared,
+                                    // the formal argument inside the thread must inherit that Shared status.
+                                    DependencyGraph[ActualDataArg].insert(FormalDataArg);
+                                }
+                            }
+                        }
+                    }
                     Function *Callee = Call->getCalledFunction();
                     bool isBlackBox = (Callee == nullptr) || Callee->isDeclaration();
                     bool isSafe = Callee && isKnownSafeLibCall(Callee->getName());
-
+                    
                     if (isBlackBox && !isSafe) {
-                        // ====================================================================
-                        // THE BLACK BOX PROTOCOL
-                        // ====================================================================
+                        //being conservative 
+                        //
                         for (unsigned i = 0; i < Call->arg_size(); ++i) {
                             Value *ActualArg = Call->getArgOperand(i);
                             
@@ -269,9 +290,6 @@ void runInterproceduralEscapeAnalysis(Module &M) {
         }
     }
 
-    // ========================================================================
-    // TODO 4: Fixed-Point Worklist Algorithm
-    // ========================================================================
     
     // Initialize the worklist with the roots found in Phase 1
     SmallVector<Value *, 64> Worklist(SharedSet.begin(), SharedSet.end());
@@ -357,13 +375,16 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
             
             Value *AccessPtr = nullptr;
             MemoryLocation AccessLoc;
-
+            bool isload = false;
+            bool isstore = false;
             if (auto *Load = dyn_cast<LoadInst>(&I)) {
                 AccessPtr = Load->getPointerOperand();
                 AccessLoc = MemoryLocation::get(Load);
+                isload = true;
             } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
                 AccessPtr = Store->getPointerOperand();
                 AccessLoc = MemoryLocation::get(Store);
+                isstore = true;
             }else{
                  // ---------------- CALL / INVOKE ----------------
                     auto *CB = dyn_cast<CallBase>(&I);
@@ -437,14 +458,9 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
                         CB->setArgOperand(3, CtxMem);
 
 
-                        // -------------------------------------------------
-                        // PART 2: POST-CALL INSTRUMENTATION
-                        // (This part remains exactly the same as you had it)
-                        // -------------------------------------------------
                         IRBuilder<> PostBuilder(CB->getNextNode());
 
                         Value *ThreadIdPtr = CB->getArgOperand(0);
-                        // Assuming pthread_t is 64-bit on your target
                         Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
 
                         PostBuilder.CreateCall(FtThreadCreate, {ChildId});
@@ -484,7 +500,7 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
                 
 
                     // ---------------- LOAD ----------------
-                    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                    if (isload) {
                         IRBuilder<> B(&I); // Insert before the load
                         instrumented_loads++;
                         // 1. Get the IR Instruction as a std::string
@@ -497,13 +513,13 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
                         Value *IrStringPtr = B.CreateGlobalString(RSO.str());
 
                         // 3. Pass it to the runtime
-                        B.CreateCall(FtRead, {LI->getPointerOperand(), IrStringPtr});
+                        B.CreateCall(FtRead, {AccessPtr, IrStringPtr});
 
                         continue;
                     }
 
                     // ---------------- STORE ----------------
-                    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                    if (isstore) {
                         IRBuilder<> B(&I);
                         instrumented_stores++;
                         std::string Str;
@@ -512,7 +528,7 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
 
                         Value *IrStringPtr = B.CreateGlobalString(RSO.str());
 
-                        B.CreateCall(FtWrite, {SI->getPointerOperand(), IrStringPtr});
+                        B.CreateCall(FtWrite, {AccessPtr, IrStringPtr});
                         continue;
                     }
 
