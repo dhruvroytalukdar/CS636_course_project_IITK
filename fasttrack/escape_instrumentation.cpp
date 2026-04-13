@@ -335,20 +335,20 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
 
         // ---- Runtime hooks ----
         FunctionCallee FtRead  =
-            M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_read", VoidTy, VoidPtrTy, Int8PtrTy);
         FunctionCallee FtWrite =
-            M.getOrInsertFunction("__wcp_write", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_write", VoidTy, VoidPtrTy, Int8PtrTy);
         FunctionCallee FtLock  =
-            M.getOrInsertFunction("__wcp_lock", VoidTy, VoidPtrTy);
+            M.getOrInsertFunction("__ft_lock", VoidTy, VoidPtrTy);
         FunctionCallee FtUnlock =
-            M.getOrInsertFunction("__wcp_unlock", VoidTy, VoidPtrTy);
+            M.getOrInsertFunction("__ft_unlock", VoidTy, VoidPtrTy);
         FunctionCallee FtThreadCreate =
-            M.getOrInsertFunction("__wcp_thread_create", VoidTy, Int64Ty);
+            M.getOrInsertFunction("__ft_thread_create", VoidTy, Int64Ty);
         FunctionCallee FtThreadJoin =
-            M.getOrInsertFunction("__wcp_thread_join", VoidTy, Int64Ty);
+            M.getOrInsertFunction("__ft_thread_join", VoidTy, Int64Ty);
 
         FunctionCallee FtPrepareContext = M.getOrInsertFunction(
-            "__wcp_prepare_context", 
+            "__ft_prepare_context", 
             VoidPtrTy,
             VoidPtrTy,
             VoidPtrTy
