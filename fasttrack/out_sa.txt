@@ -1,2 +1,0 @@
-Launch to finish   : 1996 ms
-Global Total            : 1000020000000
