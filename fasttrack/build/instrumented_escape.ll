@@ -28,8 +28,6 @@ target triple = "x86_64-pc-linux-gnu"
 @11 = private unnamed_addr constant [46 x i8] c"  %54 = load i64, ptr %48, align 8, !dbg !393\00", align 1
 @12 = private unnamed_addr constant [46 x i8] c"  %66 = load i64, ptr %65, align 8, !dbg !408\00", align 1
 @13 = private unnamed_addr constant [61 x i8] c"  %78 = load i64, ptr @_ZL12global_total, align 8, !dbg !423\00", align 1
-@14 = private unnamed_addr constant [44 x i8] c"  %4 = load i64, ptr %3, align 8, !dbg !339\00", align 1
-@15 = private unnamed_addr constant [44 x i8] c"  %7 = load i64, ptr %6, align 8, !dbg !341\00", align 1
 
 ; Function Attrs: mustprogress noinline nounwind optnone uwtable
 define dso_local noundef ptr @_Z6workerPv(ptr noundef %0) #0 !dbg !325 {
@@ -277,11 +275,9 @@ define internal noundef i64 @_ZL6now_nsv() #0 !dbg !478 {
     #dbg_declare(ptr %1, !481, !DIExpression(), !489)
   %2 = call i32 @clock_gettime(i32 noundef 1, ptr noundef %1) #4, !dbg !490
   %3 = getelementptr inbounds nuw %struct.timespec, ptr %1, i32 0, i32 0, !dbg !491
-  call void @__ft_read(ptr %3, ptr @14), !dbg !491
   %4 = load i64, ptr %3, align 8, !dbg !491
   %5 = mul i64 %4, 1000000000, !dbg !492
   %6 = getelementptr inbounds nuw %struct.timespec, ptr %1, i32 0, i32 1, !dbg !493
-  call void @__ft_read(ptr %6, ptr @15), !dbg !493
   %7 = load i64, ptr %6, align 8, !dbg !493
   %8 = add i64 %5, %7, !dbg !494
   ret i64 %8, !dbg !495
