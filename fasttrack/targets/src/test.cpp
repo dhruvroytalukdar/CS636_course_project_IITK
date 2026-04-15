@@ -1,15 +1,15 @@
 #include<pthread.h>
-// #include<vector>
+#include<vector>
 using namespace std;
 
-// static std::vector<int *> g_ptrs;
+static std::vector<int *> g_ptrs;
 static pthread_mutex_t g_vec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int* gl;
 static void *worker5(void *) {
     pthread_mutex_lock(&g_vec_mutex);
-    // int *p = g_ptrs.empty() ? nullptr : g_ptrs[0];
-    int* p = (gl == nullptr ? nullptr : gl);
+    int *p = g_ptrs.empty() ? nullptr : g_ptrs[0];
+    // int* p = (gl == nullptr ? nullptr : gl);
     pthread_mutex_unlock(&g_vec_mutex);
     if (p) *p = 55;         /* TEST_RACE_5: write (no lock on the int itself) */
     return nullptr;
@@ -26,8 +26,8 @@ void setter(int* ptr){
 static void test5_escape_via_vector() {
     int val = 0;
     pthread_mutex_lock(&g_vec_mutex);
-    // g_ptrs.push_back(&val);
-    setter(&val);
+    g_ptrs.push_back(&val);
+    // setter(&val);
     pthread_mutex_unlock(&g_vec_mutex);
 
     pthread_t t;
@@ -36,8 +36,8 @@ static void test5_escape_via_vector() {
     int x = val;            /* TEST_RACE_5: read */
     (void)x;
     pthread_join(t, nullptr);
-    // g_ptrs.clear();
-    gl = nullptr;
+    g_ptrs.clear();
+    // gl = nullptr;
 }
 
 int main(){

@@ -399,52 +399,36 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
     LLVMContext &Ctx = M.getContext();
         const DataLayout &DL = M.getDataLayout();
 
-        // Type *VoidTy    = Type::getVoidTy(Ctx);
-        // Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
-        // Type *Int64Ty   = Type::getInt64Ty(Ctx);
-        // Type *Int8PtrTy = PointerType::getUnqual(Ctx);
+        Type *VoidTy    = Type::getVoidTy(Ctx);
+        Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
+        Type *Int64Ty   = Type::getInt64Ty(Ctx);
+        Type *Int8PtrTy = PointerType::getUnqual(Ctx);
 
-        // // ---- Runtime hooks ----
-        // FunctionCallee FtRead  =
-        //     M.getOrInsertFunction("__log_load", VoidTy, VoidPtrTy, Int8PtrTy);
-        // FunctionCallee FtWrite =
-        //     M.getOrInsertFunction("__log_store", VoidTy, VoidPtrTy, Int8PtrTy);
-        // FunctionCallee FtLock  =
-        //     M.getOrInsertFunction("__log_lock", VoidTy, VoidPtrTy);
-        // FunctionCallee FtUnlock =
-        //     M.getOrInsertFunction("__log_unlock", VoidTy, VoidPtrTy);
-       
-        Type *VoidTy = Type::getVoidTy(Ctx);
-        Type *PtrTy = PointerType::getUnqual(Ctx); 
+        // ---- Runtime hooks ----
+        FunctionCallee FtRead  =
+            M.getOrInsertFunction("__ft_read", VoidTy, VoidPtrTy, Int8PtrTy);
+        FunctionCallee FtWrite =
+            M.getOrInsertFunction("__ft_write", VoidTy, VoidPtrTy, Int8PtrTy);
+        FunctionCallee FtLock  =
+            M.getOrInsertFunction("__ft_lock", VoidTy, VoidPtrTy);
+        FunctionCallee FtUnlock =
+            M.getOrInsertFunction("__ft_unlock", VoidTy, VoidPtrTy);
+        FunctionCallee FtThreadCreate =
+            M.getOrInsertFunction("__ft_thread_create", VoidTy, Int64Ty);
+        FunctionCallee FtThreadJoin =
+            M.getOrInsertFunction("__ft_thread_join", VoidTy, Int64Ty);
 
-        //define hooks
-        //void __race_log_load(void* addr)
-        FunctionCallee LogLoad = M.getOrInsertFunction("__log_load", VoidTy, PtrTy);
-        
-        //void __race_log_store(void* addr)
-        FunctionCallee LogStore = M.getOrInsertFunction("__log_store", VoidTy, PtrTy);
+        FunctionCallee FtPrepareContext = M.getOrInsertFunction(
+            "__ft_prepare_context", 
+            VoidPtrTy,
+            VoidPtrTy,
+            VoidPtrTy
+        );
 
-        //void __race_log_lock(void* mutex)
-        FunctionCallee LogLock = M.getOrInsertFunction("__log_lock", VoidTy, PtrTy);
-
-        //void __race_log_unlock(void* mutex)
-        FunctionCallee LogUnlock = M.getOrInsertFunction("__log_unlock", VoidTy, PtrTy);
-        // FunctionCallee FtThreadCreate =
-        //     // M.getOrInsertFunction("__ft_thread_create", VoidTy, Int64Ty);
-        // FunctionCallee FtThreadJoin =
-        //     M.getOrInsertFunction("__ft_thread_join", VoidTy, Int64Ty);
-
-//         FunctionCallee FtPrepareContext = M.getOrInsertFunction(
-//             "__ft_prepare_context", 
-//             VoidPtrTy,
-//             VoidPtrTy,
-//             VoidPtrTy
-//         );
-
-//         // ---- pthread_create wrapper ----
-//         FunctionCallee ThreadWrapper =
-//             M.getOrInsertFunction("thread_wrapper",
-//                                   VoidPtrTy, VoidPtrTy);
+        // ---- pthread_create wrapper ----
+        FunctionCallee ThreadWrapper =
+            M.getOrInsertFunction("thread_wrapper",
+                                  VoidPtrTy, VoidPtrTy);
     AAResults &AA = FAM.getResult<AAManager>(F);
 
     // 2. Build a LocalSharedSet: Only Values valid in the context of F
@@ -493,7 +477,7 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
                     // ---- pthread_mutex_lock ----
                     if (Name.contains("pthread_mutex_lock")) {
                         IRBuilder<> B(CB->getNextNode());
-                        B.CreateCall(LogLock,
+                        B.CreateCall(FtLock,
                                      {CB->getArgOperand(0)});
                         continue;
                     }
@@ -501,62 +485,62 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
                     // ---- pthread_mutex_unlock ----
                     if (Name.contains("pthread_mutex_unlock")) {
                         IRBuilder<> B(CB);
-                        B.CreateCall(LogUnlock,
+                        B.CreateCall(FtUnlock,
                                      {CB->getArgOperand(0)});
                         continue;
                     }
 
-                    // // ---- pthread_join ----
-                    // if (Name.contains("pthread_join")) {
-                    //     // We insert AFTER the join call returns.
-                    //     // This represents the point where Parent is guaranteed that Child has finished.
-                    //     IRBuilder<> B(CB->getNextNode());
+                    // ---- pthread_join ----
+                    if (Name.contains("pthread_join")) {
+                        // We insert AFTER the join call returns.
+                        // This represents the point where Parent is guaranteed that Child has finished.
+                        IRBuilder<> B(CB->getNextNode());
 
-                    //     // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
-                    //     Value *ChildRawId = CB->getArgOperand(0);
+                        // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
+                        Value *ChildRawId = CB->getArgOperand(0);
 
-                    //     // Inject call: __wcp_thread_join(child_pthread_t)
-                    //     // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
-                    //     B.CreateCall(FtThreadJoin, {ChildRawId});
+                        // Inject call: __wcp_thread_join(child_pthread_t)
+                        // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
+                        B.CreateCall(FtThreadJoin, {ChildRawId});
 
-                    //     continue;
-                    // }
+                        continue;
+                    }
 
-                    // // ---- pthread_create ----
-                    // if (Name.contains("pthread_create")) {
+                    // ---- pthread_create ----
+                    if (Name.contains("pthread_create")) {
 
-                    //     // -------------------------------------------------
-                    //     // PART 1: PRE-CALL INSTRUMENTATION
-                    //     // -------------------------------------------------
-                    //     IRBuilder<> PreBuilder(CB);
+                        // -------------------------------------------------
+                        // PART 1: PRE-CALL INSTRUMENTATION
+                        // -------------------------------------------------
+                        IRBuilder<> PreBuilder(CB);
 
-                    //     // 1. Get the original function (Arg 2) and original argument (Arg 3)
-                    //     Value *OrigFunc = CB->getArgOperand(2);
-                    //     Value *OrigArg  = CB->getArgOperand(3);
+                        // 1. Get the original function (Arg 2) and original argument (Arg 3)
+                        Value *OrigFunc = CB->getArgOperand(2);
+                        Value *OrigArg  = CB->getArgOperand(3);
 
-                    //     // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
-                    //     // This helper will:
-                    //     //    a) Allocate the ThreadContext (using 'new')
-                    //     //    b) Snapshot the Parent's Vector Clock
-                    //     //    c) Return the pointer to the context
-                    //     Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
+                        // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
+                        // This helper will:
+                        //    a) Allocate the ThreadContext (using 'new')
+                        //    b) Snapshot the Parent's Vector Clock
+                        //    c) Return the pointer to the context
+                        Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
 
-                    //     // 3. SWAP ARGUMENTS
-                    //     // Replace the function with our wrapper
-                    //     CB->setArgOperand(2, ThreadWrapper.getCallee());
-                    //     // Replace the argument with the context returned by our helper
-                    //     CB->setArgOperand(3, CtxMem);
+                        // 3. SWAP ARGUMENTS
+                        // Replace the function with our wrapper
+                        CB->setArgOperand(2, ThreadWrapper.getCallee());
+                        // Replace the argument with the context returned by our helper
+                        CB->setArgOperand(3, CtxMem);
 
 
-                    //     IRBuilder<> PostBuilder(CB->getNextNode());
+                        IRBuilder<> PostBuilder(CB->getNextNode());
 
-                    //     Value *ThreadIdPtr = CB->getArgOperand(0);
-                    //     Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
+                        Value *ThreadIdPtr = CB->getArgOperand(0);
+                        Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
 
-                    //     PostBuilder.CreateCall(FtThreadCreate, {ChildId});
+                        PostBuilder.CreateCall(FtThreadCreate, {ChildId});
 
-                    //     continue;
-                    // }
+                        continue;
+                    }
 
                     continue;
             }
@@ -591,29 +575,34 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
 
                     // ---------------- LOAD ----------------
                     if (isload) {
+                        IRBuilder<> B(&I); // Insert before the load
                         instrumented_loads++;
-                        auto *LI = dyn_cast<LoadInst>(&I);
                         // 1. Get the IR Instruction as a std::string
-                        // std::string Str;
-                        // raw_string_ostream RSO(Str);
-                        // I.print(RSO); // Dump instruction to stream
-                        IRBuilder<> Builder(LI); //BEFORE
-                        Builder.CreateCall(LogLoad, {LI->getPointerOperand()});
+                        std::string Str;
+                        raw_string_ostream RSO(Str);
+                        I.print(RSO); // Dump instruction to stream
 
                         // 2. Create a Global String Constant in the module
                         // This returns a Value* (Constant*) pointing to the string
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
 
                         // 3. Pass it to the runtime
+                        B.CreateCall(FtRead, {AccessPtr, IrStringPtr});
 
                         continue;
                     }
 
                     // ---------------- STORE ----------------
                     if (isstore) {
-                        auto *SI = dyn_cast<StoreInst>(&I);
+                        IRBuilder<> B(&I);
                         instrumented_stores++;
-                        IRBuilder<> Builder(SI); //BEFORE
-                        Builder.CreateCall(LogStore, {SI->getPointerOperand()});
+                        std::string Str;
+                        raw_string_ostream RSO(Str);
+                        I.print(RSO);
+
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+
+                        B.CreateCall(FtWrite, {AccessPtr, IrStringPtr});
                         continue;
                     }
 

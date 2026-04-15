@@ -1,4 +1,4 @@
-; ModuleID = 'test_base.bc'
+; ModuleID = 'test_target.bc'
 source_filename = "src/test.cpp"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
@@ -27,7 +27,6 @@ define dso_local void @_Z6setterPi(ptr noundef %0) #0 !dbg !53 {
 ; Function Attrs: mustprogress noinline norecurse optnone uwtable
 define dso_local noundef i32 @main() #1 !dbg !62 {
   %1 = alloca i32, align 4
-  call void @__log_store(ptr %1)
   store i32 0, ptr %1, align 4
   call void @_ZL23test5_escape_via_vectorv() #5, !dbg !65
   ret i32 0, !dbg !66
@@ -52,7 +51,6 @@ define internal void @_ZL23test5_escape_via_vectorv() #2 !dbg !67 {
     #dbg_declare(ptr %3, !81, !DIExpression(), !82)
   call void @__log_load(ptr %1), !dbg !83
   %7 = load i32, ptr %1, align 4, !dbg !83
-  call void @__log_store(ptr %3), !dbg !82
   store i32 %7, ptr %3, align 4, !dbg !82
   call void @__log_load(ptr %2), !dbg !84
   %8 = load i64, ptr %2, align 8, !dbg !84
@@ -75,7 +73,6 @@ declare i32 @pthread_create(ptr noundef, ptr noundef, ptr noundef, ptr noundef) 
 define internal noundef ptr @_ZL7worker5Pv(ptr noundef %0) #0 !dbg !88 {
   %2 = alloca ptr, align 8
   %3 = alloca ptr, align 8
-  call void @__log_store(ptr %2)
   store ptr %0, ptr %2, align 8
     #dbg_declare(ptr %2, !92, !DIExpression(), !93)
   %4 = call i32 @pthread_mutex_lock(ptr noundef @_ZL11g_vec_mutex) #6, !dbg !94
@@ -96,17 +93,14 @@ define internal noundef ptr @_ZL7worker5Pv(ptr noundef %0) #0 !dbg !88 {
 
 10:                                               ; preds = %8, %7
   %11 = phi ptr [ null, %7 ], [ %9, %8 ], !dbg !97
-  call void @__log_store(ptr %3), !dbg !96
   store ptr %11, ptr %3, align 8, !dbg !96
   call void @__log_unlock(ptr @_ZL11g_vec_mutex), !dbg !100
   %12 = call i32 @pthread_mutex_unlock(ptr noundef @_ZL11g_vec_mutex) #6, !dbg !100
-  call void @__log_load(ptr %3), !dbg !101
   %13 = load ptr, ptr %3, align 8, !dbg !101
   %14 = icmp ne ptr %13, null, !dbg !101
   br i1 %14, label %15, label %17, !dbg !101
 
 15:                                               ; preds = %10
-  call void @__log_load(ptr %3), !dbg !103
   %16 = load ptr, ptr %3, align 8, !dbg !103
   call void @__log_store(ptr %16), !dbg !104
   store i32 55, ptr %16, align 4, !dbg !104
@@ -120,7 +114,6 @@ define internal noundef ptr @_ZL7worker5Pv(ptr noundef %0) #0 !dbg !88 {
 define internal void @_ZL12busy_wait_msi(i32 noundef %0) #2 !dbg !107 {
   %2 = alloca i32, align 4
   %3 = alloca %struct.timespec, align 8
-  call void @__log_store(ptr %2)
   store i32 %0, ptr %2, align 4
     #dbg_declare(ptr %2, !110, !DIExpression(), !111)
     #dbg_declare(ptr %3, !112, !DIExpression(), !121)
@@ -128,7 +121,6 @@ define internal void @_ZL12busy_wait_msi(i32 noundef %0) #2 !dbg !107 {
   call void @__log_store(ptr %4), !dbg !122
   store i64 0, ptr %4, align 8, !dbg !122
   %5 = getelementptr inbounds nuw %struct.timespec, ptr %3, i32 0, i32 1, !dbg !122
-  call void @__log_load(ptr %2), !dbg !123
   %6 = load i32, ptr %2, align 4, !dbg !123
   %7 = sext i32 %6 to i64, !dbg !123
   %8 = mul nsw i64 %7, 1000000, !dbg !124
