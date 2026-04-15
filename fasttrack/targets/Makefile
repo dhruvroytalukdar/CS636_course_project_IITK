@@ -12,7 +12,7 @@ LLVM_LDFLAGS = $(shell llvm-config --ldflags)
 PASS_FLAGS = -fPIC -shared -O3
 
 # Source files for your test program and runtime
-TEST_SRC = ./src/sharing_patterns.cpp
+TEST_SRC = ./src/test.cpp
 RUNTIME_SRC = runtime.cpp
 RUNTIME_OBJ = runtime.o
 

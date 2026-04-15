@@ -38,6 +38,10 @@ using namespace llvm;
  *
  *
  */
+/*In LLVM IR, the instruction store ptr %A, ptr %B strictly dictates a memory mutation at a hardware 
+ * level, not a local register assignment.
+ * we are storing a pointer to the memory location that a shared pointer points to.
+ */
 
 namespace {
 
@@ -80,26 +84,28 @@ struct SharedPointerAnalysisPass : public PassInfoMixin<SharedPointerAnalysisPas
                         }
                     }
 
-                    // dependency graph for stores where A -> B means if A is escaped so is B.
-                    //
-                    if (auto *Store = dyn_cast<StoreInst>(&I)) {
-                        Value *A = Store->getValueOperand();
-                        // num_stores++;
-                        Value *B = Store->getPointerOperand();
+                  // dependency graph for stores where A -> B means if A is escaped so is B.
+                 
+                 //if (auto *Store = dyn_cast<StoreInst>(&I)) {
+                 //    Value *A = Store->getValueOperand();
+                 //    // num_stores++;
+                 //    Value *B = Store->getPointerOperand();
 
-                        //condition that both A and B must be pointers
-                        if (A->getType()->isPointerTy() && B->getType()->isPointerTy()) {
-                            DependencyGraph[B].insert(A);
-                        }
-                    }
+                 //    //condition that both A and B must be pointers
+                 //    if (A->getType()->isPointerTy() && B->getType()->isPointerTy()) {
+                 //        DependencyGraph[B].insert(A);
+                 //    }
+                 //}
 
-                    if(auto *Load = dyn_cast<LoadInst>(&I)){
-                        // num_loads++;
-                        Value *A = Load->getPointerOperand();
-                        if(Load->getType()->isPointerTy()){
-                            DependencyGraph[A].insert(Load);
-                        }
-                    }
+                 //if(auto *Load = dyn_cast<LoadInst>(&I)){
+                 //    // num_loads++;
+                 //    Value *A = Load->getPointerOperand();
+                 //    if(Load->getType()->isPointerTy()){
+                 //        DependencyGraph[A].insert(Load);
+
+                 //        // DependencyGraph[Load].insert(A);
+                 //    }
+                 //}
             }
 
           
@@ -135,7 +141,7 @@ struct SharedPointerAnalysisPass : public PassInfoMixin<SharedPointerAnalysisPas
         return PreservedAnalyses::none();
     }
 void runInterproceduralEscapeAnalysis(Module &M) {
-    DenseMap<Value *, SmallPtrSet<Value *, 8>> DependencyGraph;
+    // DenseMap<Value *, SmallPtrSet<Value *, 8>> DependencyGraph;
     //Global Pointer Assignment Graph
     for (Function &F : M) {
         for (BasicBlock &BB : F) {
@@ -165,6 +171,7 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     if (Load->getType()->isPointerTy()) {
                         // If P is shared, the loaded pointer SSA value becomes shared.
                         DependencyGraph[P].insert(Load);
+                        // DependencyGraph[Load].insert(P);
                     }
                 }
                 // 3. GET ELEMENT PTR (Struct/Array field access)
@@ -229,10 +236,23 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     Function *Callee = Call->getCalledFunction();
                     bool isBlackBox = (Callee == nullptr) || Callee->isDeclaration();
                     bool isSafe = Callee && isKnownSafeLibCall(Callee->getName());
-                    
+if (Callee && Callee->getName().contains("setter")) {
+    errs() << "\n[DEBUG] Found push_back call!\n";
+    errs() << "        Caller: " << F.getName() << "\n";
+    errs() << "        isDeclaration: " << Callee->isDeclaration() << "\n";
+    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+        errs() << "        Arg " << i << ": ";
+        Call->getArgOperand(i)->printAsOperand(errs(), false);
+        errs() << "\n";
+    }
+} 
                     if (isBlackBox && !isSafe) {
                         //being conservative 
                         //
+                        
+                        
+                        // errs() << Call->getName() << "\n"; 
+                        
                         bool anyArgShared = false;
                         for (unsigned i = 0; i < Call->arg_size(); ++i) {
                             if (Call->getArgOperand(i)->getType()->isPointerTy() &&
@@ -271,7 +291,7 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     // Skip indirect calls and external declarations (unless modeling them)
                     // external declaration and library calls are black box assume escaped.
                     else if(Callee && !Callee->isDeclaration()) {
-                        
+                            // errs() << Callee->getName() << "\n"; 
                         // Map Call Site Arguments to Callee Formal Arguments
                         for (unsigned i = 0; i < Call->arg_size(); ++i) {
                             Value *ActualArg = Call->getArgOperand(i);
@@ -280,11 +300,14 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                                 Argument *FormalArg = Callee->getArg(i);
                                 // If the actual argument is shared, the formal argument becomes shared
                                 DependencyGraph[ActualArg].insert(FormalArg);
+                                
 
+                                //BUG FIX 1
                                 ///discovered in a vector push back false negative. vector puch back is actually not a 
                                 ///black box function, and formal argument actually becomes shared later when stores in a global
                                 ///vector but it had no edge to this actual arg. 
                                 ///fixed it. it should not report false negatives when storing into a gloabal pointer vector 
+                                ///apprately it is not fixing it. 
                                 DependencyGraph[FormalArg].insert(ActualArg);
                             }
                         }
