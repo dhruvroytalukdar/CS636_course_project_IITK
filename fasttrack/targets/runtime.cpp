@@ -131,29 +131,52 @@ struct race {
 
 static pthread_once_t runtime_once = PTHREAD_ONCE_INIT;
 //thread Map
+// Thread Map
 std::unordered_map<int, thread_state*>& get_threads(){
-    static std::unordered_map<int, thread_state*> instance;
-    return instance;
+    static auto* instance = new std::unordered_map<int, thread_state*>();
+    return *instance;
 }
 
-//variable Map
+// Variable Map
 std::unordered_map<unsigned long, var_state*>& get_vars(int index) {
-    static std::unordered_map<unsigned long, var_state*> vars[SHARED_COUNT];
+    static auto* vars = new std::unordered_map<unsigned long, var_state*>[SHARED_COUNT];
     return vars[index];
 }
 
-//lock VC Map
+// Lock VC Map
 std::unordered_map<uint64_t, vc_t>& get_lock_vc(int index) {
-
-    static std::unordered_map<uint64_t, vc_t> instance[SHARED_COUNT];
+    static auto* instance = new std::unordered_map<uint64_t, vc_t>[SHARED_COUNT];
     return instance[index];
 }
 
-//pthread Map
+// pthread Map
 std::unordered_map<pthread_t, int>& get_pthread_map() {
-    static std::unordered_map<pthread_t, int> instance;
-    return instance;
+    static auto* instance = new std::unordered_map<pthread_t, int>();
+    return *instance;
 }
+//std::unordered_map<int, thread_state*>& get_threads(){
+//    static std::unordered_map<int, thread_state*> instance;
+//    return instance;
+//}
+
+////variable Map
+//std::unordered_map<unsigned long, var_state*>& get_vars(int index) {
+//    static std::unordered_map<unsigned long, var_state*> vars[SHARED_COUNT];
+//    return vars[index];
+//}
+
+////lock VC Map
+//std::unordered_map<uint64_t, vc_t>& get_lock_vc(int index) {
+
+//    static std::unordered_map<uint64_t, vc_t> instance[SHARED_COUNT];
+//    return instance[index];
+//}
+
+////pthread Map
+//std::unordered_map<pthread_t, int>& get_pthread_map() {
+//    static std::unordered_map<pthread_t, int> instance;
+//    return instance;
+//}
 #define threads get_threads()
 //#define vars get_vars()
 //#define lock_vc get_lock_vc()

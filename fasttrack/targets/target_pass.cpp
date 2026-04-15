@@ -171,7 +171,7 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     if (Load->getType()->isPointerTy()) {
                         // If P is shared, the loaded pointer SSA value becomes shared.
                         DependencyGraph[P].insert(Load);
-                        DependencyGraph[Load].insert(P);
+                        // DependencyGraph[Load].insert(P);
                     }
                 }
                 // 3. GET ELEMENT PTR (Struct/Array field access)
@@ -245,83 +245,84 @@ if (Callee && Callee->getName().contains("setter")) {
         Call->getArgOperand(i)->printAsOperand(errs(), false);
         errs() << "\n";
     }
- }               //    if (isBlackBox && !isSafe){
+ }          
+   if (isBlackBox && !isSafe){
 
-//     // Collect all non-nocapture pointer args
-//     SmallVector<Value*, 8> EscapingPtrArgs;
-//     for (unsigned i = 0; i < Call->arg_size(); ++i) {
-//         Value *Arg = Call->getArgOperand(i);
-//         if (!Arg->getType()->isPointerTy()) continue;
-//         if (Call->paramHasAttr(i, Attribute::NoCapture)) continue;
-//         EscapingPtrArgs.push_back(Arg);
+    // Collect all non-nocapture pointer args
+    SmallVector<Value*, 8> EscapingPtrArgs;
+    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+        Value *Arg = Call->getArgOperand(i);
+        if (!Arg->getType()->isPointerTy()) continue;
+        if (Call->paramHasAttr(i, Attribute::NoCapture)) continue;
+        EscapingPtrArgs.push_back(Arg);
         
-//         // Keep the immediate-globals fast path: if a global is directly 
-//         // passed, it's already shared and we can mark others immediately
-//         if (SharedSet.count(Arg)) {
-//             for (Value *Other : EscapingPtrArgs)
-//                 SharedSet.insert(Other);
-//         }
-//     }
+        // Keep the immediate-globals fast path: if a global is directly 
+        // passed, it's already shared and we can mark others immediately
+        if (SharedSet.count(Arg)) {
+            for (Value *Other : EscapingPtrArgs)
+                SharedSet.insert(Other);
+        }
+    }
 
-//     // THE KEY FIX: add bidirectional edges between all escaping ptr args.
-//     // This way, when any arg becomes shared via later propagation,
-//     // all others become shared too — no timing dependency on SharedSet state.
-//     for (Value *A : EscapingPtrArgs) {
-//         for (Value *B : EscapingPtrArgs) {
-//             if (A != B) {
-//                 DependencyGraph[A].insert(B);  // if A becomes shared → B shared
-//             }
-//         }
-//     }
+    // THE KEY FIX: add bidirectional edges between all escaping ptr args.
+    // This way, when any arg becomes shared via later propagation,
+    // all others become shared too — no timing dependency on SharedSet state.
+    for (Value *A : EscapingPtrArgs) {
+        for (Value *B : EscapingPtrArgs) {
+            if (A != B) {
+                DependencyGraph[A].insert(B);  // if A becomes shared → B shared
+            }
+        }
+    }
 
-//     // Return value
-//     if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
-//         for (Value *A : EscapingPtrArgs)
-//             DependencyGraph[A].insert(Call);
-//         SharedSet.insert(Call);
-//     }
-// }
-                    if (isBlackBox && !isSafe) {
-                        //being conservative 
-                        //
+    // Return value
+    if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
+        for (Value *A : EscapingPtrArgs)
+            DependencyGraph[A].insert(Call);
+        SharedSet.insert(Call);
+    }
+}
+                    //if (isBlackBox && !isSafe) {
+                    //    //being conservative 
+                    //    //
                         
                         
-                        // errs() << Call->getName() << "\n"; 
+                    //    // errs() << Call->getName() << "\n"; 
                         
-                        bool anyArgShared = false;
-                        for (unsigned i = 0; i < Call->arg_size(); ++i) {
-                            if (Call->getArgOperand(i)->getType()->isPointerTy() &&
-                                SharedSet.count(Call->getArgOperand(i))) {
-                                anyArgShared = true;
-                                break;
-                            }
-                        }
-                        for (unsigned i = 0; i < Call->arg_size(); ++i) {
-                           Value *ActualArg = Call->getArgOperand(i);
-                            if (!ActualArg->getType()->isPointerTy()) continue; 
-                        bool mayEscape = !Call->paramHasAttr(i, Attribute::NoCapture) || anyArgShared;  
-                            if (mayEscape) {
+                    //    bool anyArgShared = false;
+                    //    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+                    //        if (Call->getArgOperand(i)->getType()->isPointerTy() &&
+                    //            SharedSet.count(Call->getArgOperand(i))) {
+                    //            anyArgShared = true;
+                    //            break;
+                    //        }
+                    //    }
+                    //    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+                    //       Value *ActualArg = Call->getArgOperand(i);
+                    //        if (!ActualArg->getType()->isPointerTy()) continue; 
+                    //    bool mayEscape = !Call->paramHasAttr(i, Attribute::NoCapture) || anyArgShared;  
+                    //        if (mayEscape) {
                                 
-                                // Check if LLVM guarantees this argument doesn't escape
-                                // In modern LLVM, we check the parameter attributes on the CallBase
+                    //            // Check if LLVM guarantees this argument doesn't escape
+                    //            // In modern LLVM, we check the parameter attributes on the CallBase
                                     
-                                    // The pointer might escape! 
-                                    // It becomes a new ROOT of shared memory.
-                                SharedSet.insert(ActualArg);
-                                        // If you evaluate this during the graph-building phase, 
-                                        // you must ensure ActualArg gets pushed to your Worklist later!
-                            }
-                        }
+                    //                // The pointer might escape! 
+                    //                // It becomes a new ROOT of shared memory.
+                    //            SharedSet.insert(ActualArg);
+                    //                    // If you evaluate this during the graph-building phase, 
+                    //                    // you must ensure ActualArg gets pushed to your Worklist later!
+                    //        }
+                    //    }
                         
-                        // Note on Return Values: If a black box returns a pointer (e.g., void* p = unknown()), 
-                        // it might be returning a pointer to shared global memory. 
-                        // For strict soundness, the CallInst itself should also be added to the SharedSet.
-                        if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
-                             SharedSet.insert(Call);
+                    //    // Note on Return Values: If a black box returns a pointer (e.g., void* p = unknown()), 
+                    //    // it might be returning a pointer to shared global memory. 
+                    //    // For strict soundness, the CallInst itself should also be added to the SharedSet.
+                    //    if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
+                    //         SharedSet.insert(Call);
                              
                         
-                        } 
-                    }
+                    //    } 
+                    //}
                         
                     // Skip indirect calls and external declarations (unless modeling them)
                     // external declaration and library calls are black box assume escaped.
