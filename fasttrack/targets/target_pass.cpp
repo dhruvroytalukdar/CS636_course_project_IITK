@@ -285,8 +285,8 @@ if (Callee && Callee->getName().contains("setter")) {
                              SharedSet.insert(Call);
                              
                         
-                    } 
-
+                        } 
+                    }
                         
                     // Skip indirect calls and external declarations (unless modeling them)
                     // external declaration and library calls are black box assume escaped.
@@ -323,8 +323,8 @@ if (Callee && Callee->getName().contains("setter")) {
                                 }
                             }
                         }
-                    }
-                }
+                    }////
+                } ///call inst brace.
             }
         }
     }
@@ -353,7 +353,7 @@ if (Callee && Callee->getName().contains("setter")) {
         }
     }
 }
-}
+
 private:
     
 unsigned long num_loads;
