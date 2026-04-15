@@ -30,12 +30,14 @@ static void test5_escape_via_vector() {
     // setter(&val);
     pthread_mutex_unlock(&g_vec_mutex);
 
-    pthread_t t;
+    pthread_t t, t1;
     pthread_create(&t, nullptr, worker5, nullptr);
+    // pthread_create(&t1, nullptr, worker5, nullptr);
     busy_wait_ms(1);
     int x = val;            /* TEST_RACE_5: read */
     (void)x;
     pthread_join(t, nullptr);
+    // pthread_join(t1, nullptr);
     g_ptrs.clear();
     // gl = nullptr;
 }

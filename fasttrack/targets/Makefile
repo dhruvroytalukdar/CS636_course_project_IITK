@@ -1,7 +1,7 @@
 # ==========================================
 # Configuration Variables
 # ==========================================
-CXX = clang++ -std=c++20
+CXX = clang++ -std=c++20 -g
 CC = clang
 
 # Fetch LLVM build flags dynamically
@@ -12,14 +12,18 @@ LLVM_LDFLAGS = $(shell llvm-config --ldflags)
 PASS_FLAGS = -fPIC -shared -O3
 
 # Source files for your test program and runtime
-TEST_SRC = ./src/test.cpp
-RUNTIME_SRC = runtime3.cpp
+# TEST_SRC = ./src/test.cpp
+
+TEST_SRC = ./src/sharing_patterns.cpp
+RUNTIME_SRC = runtime.cpp
 RUNTIME_OBJ = runtime.o
+BASE_PASS = base_pass.cpp
+TARGET_PASS = target_pass.cpp
 
 # The pass pipeline names (MUST match the names registered in llvmGetPassPluginInfo)
 # Update these if your PassPluginInfo registers different string names!
-# BASE_PASS_CMD = base-pass
-BASE_PASS_CMD = fasttrack-pass
+BASE_PASS_CMD = base-pass
+# BASE_PASS_CMD = fasttrack-pass
 TARGET_PASS_CMD = shared-ptr-analysis
 
 
@@ -39,10 +43,10 @@ $(RUNTIME_OBJ): $(RUNTIME_SRC)
 # ==========================================
 # 2. Build the LLVM Passes (.so files)
 # ==========================================
-base_pass.so: base_pass2.cpp
+base_pass.so: $(BASE_PASS)
 	$(CXX) $(LLVM_CXXFLAGS) $(PASS_FLAGS) $< -o $@ $(LLVM_LDFLAGS)
 
-target_pass.so: target_pass2.cpp
+target_pass.so: $(TARGET_PASS)
 	$(CXX) $(LLVM_CXXFLAGS) $(PASS_FLAGS) $< -o $@ $(LLVM_LDFLAGS)
 
 # ==========================================
@@ -50,7 +54,7 @@ target_pass.so: target_pass2.cpp
 # ==========================================
 # Using -O1 to run mem2reg and clean up noisy alloca instructions
 test.bc: $(TEST_SRC)
-	$(CXX) -emit-llvm -O1 -fno-inline -fno-builtin \
+	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin \
 	       -fno-omit-frame-pointer -g \
 	       -c $< -o $@
 	# $(CC) -O0 -emit-llvm -c $< -o $@
