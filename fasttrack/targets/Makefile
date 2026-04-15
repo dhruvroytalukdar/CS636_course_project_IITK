@@ -13,12 +13,13 @@ PASS_FLAGS = -fPIC -shared -O3
 
 # Source files for your test program and runtime
 TEST_SRC = ./src/test.cpp
-RUNTIME_SRC = runtime.cpp
+RUNTIME_SRC = runtime3.cpp
 RUNTIME_OBJ = runtime.o
 
 # The pass pipeline names (MUST match the names registered in llvmGetPassPluginInfo)
 # Update these if your PassPluginInfo registers different string names!
-BASE_PASS_CMD = base-pass
+# BASE_PASS_CMD = base-pass
+BASE_PASS_CMD = fasttrack-pass
 TARGET_PASS_CMD = shared-ptr-analysis
 
 
@@ -38,10 +39,10 @@ $(RUNTIME_OBJ): $(RUNTIME_SRC)
 # ==========================================
 # 2. Build the LLVM Passes (.so files)
 # ==========================================
-base_pass.so: base_pass.cpp
+base_pass.so: base_pass2.cpp
 	$(CXX) $(LLVM_CXXFLAGS) $(PASS_FLAGS) $< -o $@ $(LLVM_LDFLAGS)
 
-target_pass.so: target_pass.cpp
+target_pass.so: target_pass2.cpp
 	$(CXX) $(LLVM_CXXFLAGS) $(PASS_FLAGS) $< -o $@ $(LLVM_LDFLAGS)
 
 # ==========================================
@@ -49,7 +50,7 @@ target_pass.so: target_pass.cpp
 # ==========================================
 # Using -O1 to run mem2reg and clean up noisy alloca instructions
 test.bc: $(TEST_SRC)
-	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin \
+	$(CXX) -emit-llvm -O1 -fno-inline -fno-builtin \
 	       -fno-omit-frame-pointer -g \
 	       -c $< -o $@
 	# $(CC) -O0 -emit-llvm -c $< -o $@

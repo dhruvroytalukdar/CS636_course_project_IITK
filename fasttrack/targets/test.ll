@@ -14,10 +14,8 @@ target triple = "x86_64-pc-linux-gnu"
 ; Function Attrs: mustprogress noinline nounwind optnone uwtable
 define dso_local void @_Z6setterPi(ptr noundef %0) #0 !dbg !53 {
   %2 = alloca ptr, align 8
-  call void @__log_store(ptr %2)
   store ptr %0, ptr %2, align 8
     #dbg_declare(ptr %2, !57, !DIExpression(), !58)
-  call void @__log_load(ptr %2), !dbg !59
   %3 = load ptr, ptr %2, align 8, !dbg !59
   call void @__log_store(ptr @gl), !dbg !60
   store ptr %3, ptr @gl, align 8, !dbg !60
