@@ -1,0 +1,11 @@
+clang++ -std=c++20 -emit-llvm -O0 -fno-inline -fno-builtin \
+       -fno-omit-frame-pointer -g \
+       -c src/sharing_patterns.cpp -o test.bc
+# clang -O0 -emit-llvm -c src/sharing_patterns.cpp -o test.bc
+clang++ -std=c++20 -I/usr/lib/llvm-20/include -std=c++17   -fno-exceptions -funwind-tables -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -fPIC -shared -O3 base_pass.cpp -o base_pass.so -L/usr/lib/llvm-20/lib 
+opt -load-pass-plugin=./base_pass.so  -passes="base-pass" test.bc -o test_base.bc
+clang++ -std=c++20 -O3 -c runtime.cpp -o runtime.o
+clang++ -std=c++20 test_base.bc runtime.o -o base -lpthread
+clang++ -std=c++20 -I/usr/lib/llvm-20/include -std=c++17   -fno-exceptions -funwind-tables -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -fPIC -shared -O3 target_pass.cpp -o target_pass.so -L/usr/lib/llvm-20/lib 
+opt -load-pass-plugin=./target_pass.so -passes="shared-ptr-analysis" test.bc -o test_target.bc
+clang++ -std=c++20 test_target.bc runtime.o -o target -lpthread
