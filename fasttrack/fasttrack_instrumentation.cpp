@@ -19,13 +19,13 @@ struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
         Type *VoidTy    = Type::getVoidTy(Ctx);
         Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
         Type *Int64Ty   = Type::getInt64Ty(Ctx);
-        Type *Int8PtrTy = PointerType::getUnqual(Ctx);
+        Type *Int32Ty   = Type::getInt32Ty(Ctx);
 
         // ---- Runtime hooks ----
         FunctionCallee FtRead  =
-            M.getOrInsertFunction("__ft_read", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_read", VoidTy, VoidPtrTy, Int32Ty);
         FunctionCallee FtWrite =
-            M.getOrInsertFunction("__ft_write", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_write", VoidTy, VoidPtrTy, Int32Ty);
         FunctionCallee FtLock  =
             M.getOrInsertFunction("__ft_lock", VoidTy, VoidPtrTy);
         FunctionCallee FtUnlock =
@@ -57,32 +57,36 @@ struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
                     // ---------------- LOAD ----------------
                     if (auto *LI = dyn_cast<LoadInst>(&I)) {
                         IRBuilder<> B(&I); // Insert before the load
-    
-                        // 1. Get the IR Instruction as a std::string
-                        std::string Str;
-                        raw_string_ostream RSO(Str);
-                        I.print(RSO); // Dump instruction to stream
                         
-                        // 2. Create a Global String Constant in the module
-                        // This returns a Value* (Constant*) pointing to the string
-                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
+                        // 1. Extract the Line Number from debug metadata
+                        int line_no = 0;
+                        if (const DebugLoc &Loc = I.getDebugLoc()) {
+                            line_no = Loc.getLine();
+                        }
+                        
+                        // 2. Create an LLVM Constant Integer for the line number
+                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
 
-                        // 3. Pass it to the runtime
-                        B.CreateCall(FtRead, {LI->getPointerOperand(), IrStringPtr});
-                        
+                        // 3. Pass the pointer and the line number to the runtime
+                        B.CreateCall(FtRead, {LI->getPointerOperand(), LineArg});
                         continue;
                     }
 
                     // ---------------- STORE ----------------
                     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                        IRBuilder<> B(&I);
-                        std::string Str;
-                        raw_string_ostream RSO(Str);
-                        I.print(RSO);
+                        IRBuilder<> B(&I); // Insert before the store
                         
-                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
+                        // 1. Extract the Line Number from debug metadata
+                        int line_no = 0;
+                        if (const DebugLoc &Loc = I.getDebugLoc()) {
+                            line_no = Loc.getLine();
+                        }
+                        
+                        // 2. Create an LLVM Constant Integer for the line number
+                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
 
-                        B.CreateCall(FtWrite, {SI->getPointerOperand(), IrStringPtr});
+                        // 3. Pass the pointer and the line number to the runtime
+                        B.CreateCall(FtWrite, {SI->getPointerOperand(), LineArg});
                         continue;
                     }
 

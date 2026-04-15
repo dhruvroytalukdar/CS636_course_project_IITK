@@ -8,16 +8,6 @@
 #define NUM_THREADS     4
 #define WORK_ITERS      5000000   // 5M solo accesses per thread
 
-// ── Variables ─────────────────────────────────────────────────────
-//
-// thread_buffers[i]: Exclusively modified by thread i during the solo phase.
-//   SA: Safely transitions from UNACCESSED -> OWNED(main) -> OWNED(i).
-//       Once owned by thread i, the lock-free fast path skips the remaining 
-//       10 million reads/writes per thread.
-//   FT: Performs full vector-clock math and lock acquisitions for every single access.
-//
-// global_total: Shared among all threads, but STRICTLY protected by total_mtx.
-//   Both tools will process this correctly without reporting a race.
 
 struct PaddedBuffer {
     long local_sum;
@@ -40,19 +30,15 @@ static inline uint64_t now_ns() {
 void* worker(void* arg) {
     int id = *(int*)arg;
 
-    // ── SOLO PHASE (Heavy execution, NO races) ────────────────────
-    // Thread `id` exclusively reads and writes to its own padded buffer.
+    // ── SOLO PHASE ────────────────────
     long temp_sum = 0;
     for (int i = 0; i < WORK_ITERS; i++) {
-        // Modifying the local array to trigger read/write instrumentation
         thread_buffers[id].array[i % 100] += (i % 5);
         temp_sum += thread_buffers[id].array[i % 100];
     }
     thread_buffers[id].local_sum = temp_sum;
 
-    // ── SHARED PHASE (Synchronized, NO races) ─────────────────────
-    // Threads safely aggregate their local sum to the global total.
-    // The mutex creates a strict Happens-Before edge for every access.
+    // ── SHARED PHASE ─────────────────────
     pthread_mutex_lock(&total_mtx);
     global_total += thread_buffers[id].local_sum;
     pthread_mutex_unlock(&total_mtx);
@@ -66,8 +52,6 @@ int main() {
     uint64_t start_ns = now_ns();
 
     // ── INITIALIZATION ────────────────────────────────────────────
-    // Main thread writes to everything here. 
-    // SA considers everything OWNED(main).
     for (int i = 0; i < NUM_THREADS; i++) {
         thread_buffers[i].local_sum = 0;
         for (int j = 0; j < 100; j++) {
@@ -76,14 +60,12 @@ int main() {
     }
 
     // ── SPAWN ─────────────────────────────────────────────────────
-    // pthread_create establishes a Happens-Before edge from Main -> Child.
     for (int i = 0; i < NUM_THREADS; i++) {
         ids[i] = i;
         pthread_create(&threads[i], NULL, worker, &ids[i]);
     }
 
     // ── JOIN ──────────────────────────────────────────────────────
-    // pthread_join establishes a Happens-Before edge from Child -> Main.
     for (int i = 0; i < NUM_THREADS; i++) {
         pthread_join(threads[i], NULL);
     }

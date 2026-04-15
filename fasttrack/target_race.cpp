@@ -1,36 +1,13 @@
 // ============================================================
 // TARGET PROGRAM 1: HAS DATA RACE
-//
-// Sync primitives used: pthread_mutex, pthread_cond, pthread_create,
-// pthread_join — all instrumented by the LLVM pass.
-// NO barriers used.
-//
-// Scenario: 4 worker threads process chunks of a shared buffer.
-//   - A shared accumulator is updated without a lock  (RACE)
-//   - A done_flag is written by main without joining  (RACE)
-//   - A safe_counter is properly mutex-protected      (no race)
-//
-// Sharing analysis state transitions:
-//   shared_buf    : OWNED(main) during init
-//                   → SHARED when workers read concurrently
-//                     (reads are fine but sharing analysis promotes it)
-//   accumulator   : UNACCESSED
-//                   → OWNED(worker_0) on first access
-//                   → SHARED when worker_1 arrives, is_ordered()==false
-//                   FastTrack fires W-W / R-W
-//   done_flag     : OWNED(main) during init
-//                   → SHARED when monitor reads, is_ordered()==false
-//                   FastTrack fires W-R
-//   safe_counter  : OWNED(worker_0) on first access
-//                   → SHARED when worker_1 arrives
-//                   but every FastTrack check passes (lock gives HB)
-//                   → no race reported
 // ============================================================
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <stdint.h>
 
 #define NUM_WORKERS  4
 #define BUF_SIZE     1024
@@ -55,6 +32,14 @@ static pthread_mutex_t done_mtx     = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  done_cond    = PTHREAD_COND_INITIALIZER;
 
 struct WorkerArg { int id; int start; int end; };
+
+// ── Timing ────────────────────────────────────────────────────────
+static inline uint64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 
 void* worker(void* arg) {
     WorkerArg* wa = (WorkerArg*)arg;
@@ -123,6 +108,8 @@ int main() {
     pthread_t  wthreads[NUM_WORKERS];
     pthread_t  mon;
 
+    uint64_t start_ns = now_ns();
+
     for (int i = 0; i < NUM_WORKERS; i++) {
         args[i] = { i, i * CHUNK, (i + 1) * CHUNK };
         pthread_create(&wthreads[i], NULL, worker, &args[i]);
@@ -148,6 +135,11 @@ int main() {
         pthread_join(wthreads[i], NULL);
     pthread_join(mon, NULL);
 
+    uint64_t end_ns = now_ns();
+    
+    printf("Launch to finish   : %llu ms\n", 
+           (unsigned long long)((end_ns - start_ns) / 1000000ULL));
+    
     printf("[main] accumulator=%ld  safe_counter=%ld\n",
            accumulator, safe_counter);
     printf("[main] accumulator should equal safe_counter if no torn writes.\n");

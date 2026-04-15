@@ -40,10 +40,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
 
-#define NUM_CONSUMERS    4
-#define TASKS_PER_PHASE  48
-#define NUM_PHASES       3
+#define NUM_CONSUMERS    10
+#define TASKS_PER_PHASE  1000
+#define NUM_PHASES       5
 
 // ── Task queue ───────────────────────────────────────────────────
 struct Task { int phase; int id; int value; };
@@ -63,6 +65,14 @@ static long results[NUM_CONSUMERS];
 
 // ── Final merged result (owned by main after all joins) ──────────
 static long merged_result = 0;
+
+// ── Timing ────────────────────────────────────────────────────────
+static inline uint64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 
 // ── Producer ─────────────────────────────────────────────────────
 void* producer(void* arg) {
@@ -170,6 +180,8 @@ int main() {
     pthread_t cons[NUM_CONSUMERS];
     int       ids[NUM_CONSUMERS];
 
+    uint64_t start_ns = now_ns();
+
     pthread_create(&prod, NULL, producer, NULL);
     for (int i = 0; i < NUM_CONSUMERS; i++) {
         ids[i] = i;
@@ -185,6 +197,11 @@ int main() {
 
     // All joins done — main has full HB over everything
     reduce();
+
+    uint64_t end_ns = now_ns();
+    
+    printf("Launch to finish   : %llu ms\n", 
+           (unsigned long long)((end_ns - start_ns) / 1000000ULL));
 
     printf("[main] merged_result = %ld\n", merged_result);
     printf("[main] per-consumer results: ");

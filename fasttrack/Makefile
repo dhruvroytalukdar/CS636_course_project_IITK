@@ -1,83 +1,17 @@
-# # Variables
-# CXX := clang++
-# OPT := opt
-# LLVM_CONFIG := llvm-config
-
-# # Flags retrieved from llvm-config
-# # Note: We filter out some flags that might conflict or be unnecessary for simple plugins
-# CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags)
-# LDFLAGS := $(shell $(LLVM_CONFIG) --ldflags)
-
-# # Project Files
-# TARGET_SRC ?= target_no_race.cpp
-# PASS_SRC := fasttrack_instrumentation.cpp
-# RUNTIME_SRC := fasttrack_runtime.cpp
-
-# # Output Names
-# PLUGIN := llvmpass.so
-# PASS_NAME := fasttrack-pass
-# EXECUTABLE := race_detector
-
-# # Intermediate Files
-# TARGET_BC := main.bc
-# TARGET_INST_BC := main_inst.bc
-# RUNTIME_OBJ := fasttrack.o
-
-
-# # Default Target: Build everything
-# all: $(EXECUTABLE)
-
-# # 1. Compile the Runtime Library (fasttrack.cpp -> fasttrack.o)
-# $(RUNTIME_OBJ): $(RUNTIME_SRC)
-# 	@echo "Compiling Runtime..."
-# 	$(CXX) -c $(RUNTIME_SRC) -o $(RUNTIME_OBJ)
-
-# # 2. Build the LLVM Pass Plugin (InstrumentPass.cpp -> InstrumentPass.so)
-# $(PLUGIN): $(PASS_SRC)
-# 	@echo "Building LLVM Pass..."
-# 	$(CXX) -fPIC -shared $(PASS_SRC) -o $(PLUGIN) $(CXXFLAGS) $(LDFLAGS)
-
-# # 3. Emit LLVM IR for the Target (main.cpp -> main.bc)
-# $(TARGET_BC): $(TARGET_SRC)
-# 	@echo "Generating LLVM IR..."
-# 	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin -fno-omit-frame-pointer \
-# 	       -c $(TARGET_SRC) -o $(TARGET_BC) -g
-
-# # 4. Instrument the IR using 'opt' (main.bc -> main_inst.bc)
-# $(TARGET_INST_BC): $(TARGET_BC) $(PLUGIN)
-# 	@echo "Running Instrumentation Pass..."
-# 	$(OPT) -load-pass-plugin=./$(PLUGIN) \
-# 	       -passes="default<O0>,$(PASS_NAME)" \
-# 	       $(TARGET_BC) -o $(TARGET_INST_BC)
-
-# # 5. Link everything together (main_inst.bc + fasttrack.o -> executable)
-# $(EXECUTABLE): $(TARGET_INST_BC) $(RUNTIME_OBJ)
-# 	@echo "Linking Final Executable..."
-# 	$(CXX) $(TARGET_INST_BC) $(RUNTIME_OBJ) -o $(EXECUTABLE) -lpthread
-
-# # Run the program
-# run: $(EXECUTABLE)
-# 	@echo "Running Race Detector..."
-# 	./$(EXECUTABLE)
-
-# # Clean up all generated files
-# clean:
-# 	@echo "Cleaning up..."
-# 	rm -f $(PLUGIN) $(TARGET_BC) $(TARGET_INST_BC) $(RUNTIME_OBJ) $(EXECUTABLE) *.o *.so *.bc
 CXX         := clang++
 OPT         := opt
 LLVM_CONFIG := llvm-config
 
 CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags)
 LDFLAGS  := $(shell $(LLVM_CONFIG) --ldflags)
+TSAN_FLAGS = -fsanitize=thread -g -O1
 
 PASS_SRC   := fasttrack_instrumentation.cpp
 PLUGIN     := llvmpass.so
 PASS_NAME  := fasttrack-pass
 
 RUNTIME_FT := fasttrack_runtime.cpp
-RUNTIME_SA := fasttrack_runtime_with_sa.cpp
-
+RUNTIME_SA := fasttrack_runtime_with_sa_ver4.cpp
 TARGET_SRC := test_efficiency_no_race.cpp
 
 TARGET_BC      := efficiency.bc
@@ -90,6 +24,35 @@ BENCH_FT := bench_ft
 BENCH_SA := bench_sa
 
 all: $(BENCH_FT) $(BENCH_SA)
+
+# --- TSAN Build ---
+bench_tsan: $(TARGET_SRC)
+	@echo "[Build] Compiling TSAN Baseline..."
+	$(CXX) $(TSAN_FLAGS) $(TARGET_SRC) -o bench_tsan -lpthread
+
+# --- LLVM IR Generation ---
+# Generates human-readable LLVM IR (.ll) so Python can map !dbg tags to lines
+target_ir: $(TARGET_SRC)
+	@echo "[Build] Generating LLVM IR for Debug Mapping..."
+	$(CXX) -S -emit-llvm -g $(TARGET_SRC) -o $(basename $(TARGET_SRC)).ll
+
+# --- Automated Comparison Pipeline ---
+compare: bench_tsan target_ir bench_ft bench_sa
+	@echo "========================================"
+	@echo " Running Executions..."
+	@echo "========================================"
+	-./bench_tsan 2>&1 | tee out_tsan.txt > /dev/null
+	-./bench_ft 2>&1 | tee out_ft.txt > /dev/null
+	-./bench_sa 2>&1 | tee out_sa.txt > /dev/null
+	@echo "[Done] Logs saved."
+	@echo "\n========================================"
+	@echo " Running Automated Python Analysis..."
+	@echo "========================================"
+	@python3 compare_races.py $(TARGET_SRC)
+
+# Clean up generated baseline files
+clean_compare:
+	rm -f bench_tsan out_tsan.txt out_ft.txt out_sa.txt *.ll
 
 $(PLUGIN): $(PASS_SRC)
 	@echo "[1] Building LLVM pass..."
@@ -122,6 +85,18 @@ $(BENCH_FT): $(TARGET_INST_BC) $(RUNTIME_FT_OBJ)
 $(BENCH_SA): $(TARGET_INST_BC) $(RUNTIME_SA_OBJ)
 	@echo "[5b] Linking bench_sa..."
 	$(CXX) $(TARGET_INST_BC) $(RUNTIME_SA_OBJ) -o $(BENCH_SA) -lpthread
+
+help:
+	@echo "================================================================"
+	@echo "                FastTrack LLVM Build System"
+	@echo "================================================================"
+	@echo "Available commands:"
+	@echo "  make all     - Build both bench_ft and bench_sa executables (Default)"
+	@echo "  make compare - Run automated TSAN validation using Python"
+	@echo "  make run     - Execute both benchmarks and compare race reports & time"
+	@echo "  make debug   - Disassemble instrumented bitcode and show call counts"
+	@echo "  make clean   - Remove all build artifacts, object files, and logs"
+	@echo "================================================================"
 
 run: $(BENCH_FT) $(BENCH_SA)
 	@echo ""
@@ -156,7 +131,7 @@ debug: $(TARGET_INST_BC)
 clean:
 	rm -f $(PLUGIN) $(TARGET_BC) $(TARGET_INST_BC) \
 	      $(RUNTIME_FT_OBJ) $(RUNTIME_SA_OBJ) \
-	      $(BENCH_FT) $(BENCH_SA) \
-	      out_ft.txt out_sa.txt *.o *.so *.bc
+	      $(BENCH_FT) $(BENCH_SA) bench_tsan \
+	      out_ft.txt out_sa.txt out_tsan.txt *.o *.so *.bc *.ll
 
-.PHONY: all run debug clean
+.PHONY: all run debug clean clean_compare help target_ir compare
