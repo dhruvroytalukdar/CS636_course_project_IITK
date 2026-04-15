@@ -1,16 +1,16 @@
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
 
 namespace {
-// Define the pass
-struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
-unsigned long num_loads;
-unsigned long num_stores;
+
+struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
 
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
         LLVMContext &Ctx = M.getContext();
@@ -23,20 +23,20 @@ unsigned long num_stores;
 
         // ---- Runtime hooks ----
         FunctionCallee FtRead  =
-            M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_read", VoidTy, VoidPtrTy, Int8PtrTy);
         FunctionCallee FtWrite =
-            M.getOrInsertFunction("__wcp_write", VoidTy, VoidPtrTy, Int8PtrTy);
+            M.getOrInsertFunction("__ft_write", VoidTy, VoidPtrTy, Int8PtrTy);
         FunctionCallee FtLock  =
-            M.getOrInsertFunction("__wcp_lock", VoidTy, VoidPtrTy);
+            M.getOrInsertFunction("__ft_lock", VoidTy, VoidPtrTy);
         FunctionCallee FtUnlock =
-            M.getOrInsertFunction("__wcp_unlock", VoidTy, VoidPtrTy);
+            M.getOrInsertFunction("__ft_unlock", VoidTy, VoidPtrTy);
         FunctionCallee FtThreadCreate =
-            M.getOrInsertFunction("__wcp_thread_create", VoidTy, Int64Ty);
+            M.getOrInsertFunction("__ft_thread_create", VoidTy, Int64Ty);
         FunctionCallee FtThreadJoin =
-            M.getOrInsertFunction("__wcp_thread_join", VoidTy, Int64Ty);
+            M.getOrInsertFunction("__ft_thread_join", VoidTy, Int64Ty);
 
         FunctionCallee FtPrepareContext = M.getOrInsertFunction(
-            "__wcp_prepare_context", 
+            "__ft_prepare_context", 
             VoidPtrTy,
             VoidPtrTy,
             VoidPtrTy
@@ -56,17 +56,16 @@ unsigned long num_stores;
 
                     // ---------------- LOAD ----------------
                     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                        num_loads++;
                         IRBuilder<> B(&I); // Insert before the load
     
                         // 1. Get the IR Instruction as a std::string
                         std::string Str;
                         raw_string_ostream RSO(Str);
                         I.print(RSO); // Dump instruction to stream
-                         
+                        
                         // 2. Create a Global String Constant in the module
                         // This returns a Value* (Constant*) pointing to the string
-                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
 
                         // 3. Pass it to the runtime
                         B.CreateCall(FtRead, {LI->getPointerOperand(), IrStringPtr});
@@ -76,13 +75,12 @@ unsigned long num_stores;
 
                     // ---------------- STORE ----------------
                     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                        num_stores++;
                         IRBuilder<> B(&I);
                         std::string Str;
                         raw_string_ostream RSO(Str);
                         I.print(RSO);
                         
-                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+                        Value *IrStringPtr = B.CreateGlobalStringPtr(RSO.str());
 
                         B.CreateCall(FtWrite, {SI->getPointerOperand(), IrStringPtr});
                         continue;
@@ -118,6 +116,19 @@ unsigned long num_stores;
                         continue;
                     }
 
+                    // ---- pthread_cond_wait ----
+                    if (Name.contains("pthread_cond_wait")) {
+                        Value *MutexArg = CB->getArgOperand(1);
+
+                        IRBuilder<> PreB(CB);
+                        PreB.CreateCall(FtUnlock, {MutexArg});
+
+                        IRBuilder<> PostB(CB->getNextNode());
+                        PostB.CreateCall(FtLock, {MutexArg});
+
+                        continue;
+                    }
+
                     // ---- pthread_join ----
                     if (Name.contains("pthread_join")) {
                         // We insert AFTER the join call returns.
@@ -127,7 +138,7 @@ unsigned long num_stores;
                         // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
                         Value *ChildRawId = CB->getArgOperand(0);
 
-                        // Inject call: __wcp_thread_join(child_pthread_t)
+                        // Inject call: __ft_thread_join(child_pthread_t)
                         // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
                         B.CreateCall(FtThreadJoin, {ChildRawId});
 
@@ -146,7 +157,7 @@ unsigned long num_stores;
                         Value *OrigFunc = CB->getArgOperand(2);
                         Value *OrigArg  = CB->getArgOperand(3);
 
-                        // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
+                        // 2. Call the C++ Runtime Helper: __ft_prepare_context(func, arg)
                         // This helper will:
                         //    a) Allocate the ThreadContext (using 'new')
                         //    b) Snapshot the Parent's Vector Clock
@@ -177,29 +188,30 @@ unsigned long num_stores;
                 }
             }
         }
-        errs() << "loads = " << num_loads << "\n";
-        errs() << "stores = " << num_stores << "\n";
 
         return PreservedAnalyses::none();
     }
-
 };
 
-}
+} // namespace
 
-// Register the pass so it can be loaded via standard 'opt'
-extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
-llvmGetPassPluginInfo() {
-    return {LLVM_PLUGIN_API_VERSION, "InstrumentMemoryPass", LLVM_VERSION_STRING,
-            [](PassBuilder &PB) {
-                PB.registerPipelineParsingCallback(
-                    [](StringRef Name, ModulePassManager &MPM,
-                       ArrayRef<PassBuilder::PipelineElement>) {
-                        if (Name == "instrument-memory") {
-                            MPM.addPass(InstrumentMemoryPass());
-                            return true;
-                        }
-                        return false;
-                    });
-            }};
+// ---- Plugin registration ----
+extern "C" LLVM_ATTRIBUTE_WEAK
+::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return {
+        LLVM_PLUGIN_API_VERSION,
+        "FastTrackPass",
+        LLVM_VERSION_STRING,
+        [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name,
+                   ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    if (Name == "fasttrack-pass") {
+                        MPM.addPass(FastTrackPass());
+                        return true;
+                    }
+                    return false;
+                });
+        }};
 }
