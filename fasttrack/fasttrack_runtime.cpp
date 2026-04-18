@@ -14,7 +14,6 @@ const Epoch READ_SHARED = (Epoch)-1;
 const int CLOCK_BITS = 32;
 const unsigned long long CLOCK_MASK = 0xFFFFFFFF;
 
-
 Epoch make_epoch(int tid, int clock) {
     // Shift TID to the high bits, mask Clock to the low bits, and combine
     return ((Epoch)tid << CLOCK_BITS) | (clock & CLOCK_MASK);
@@ -130,14 +129,6 @@ static void vec_set_epoch(std::vector<Epoch>& v, int idx, Epoch val) {
 }
 
 ThreadState* get_current_thread() {
-    // pthread_t self = pthread_self();
-    // std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
-    // auto& threads = get_threads_map();
-    // if (threads.find(self) == threads.end()) {
-    //     threads[self] = new ThreadState(next_tid++);
-    // }
-    // return threads[self];
-
     if (tl_thread_state) return tl_thread_state;
     pthread_t self = pthread_self();
     std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
@@ -149,7 +140,7 @@ ThreadState* get_current_thread() {
 }
 
 VarState* get_var_state(void* addr) {
-    uintptr_t key  = (uintptr_t)addr >> 2 + 1;
+    uintptr_t key  = ((uintptr_t)addr >> 2) + 1;
     size_t    slot = (key * 2654435761ULL) & SHADOW_MASK;
 
     for (;;) {
@@ -283,6 +274,7 @@ extern "C" {
         tl_thread_state = nullptr;
         return result;
     }
+
 
 
     // ------------------------------------------------------------
@@ -484,27 +476,20 @@ extern "C" {
     // ------------------------------------------------------------
     // LOCK EVENTS
     // ------------------------------------------------------------
+
     void __ft_lock(void* mutex_addr) {
         ThreadState* t = get_current_thread();
+    
         LockState* m = get_lock_state(mutex_addr);
-
+    
         std::lock_guard<std::recursive_mutex> lock(m->mtx);
         std::lock_guard<std::recursive_mutex> lock2(t->mtx);
-
-
-        // FIX: Resize Thread's VC if the Lock knows about more threads than we do
-        if (m->L.size() > t->C.size()) {
+    
+        // FT vector clock merge
+        if (m->L.size() > t->C.size())
             t->C.resize(m->L.size(), 0);
-        }
-
-        // Now perform the standard Vector Clock Join
-        // t.C = max(t.C, m.L)
-        for (size_t i = 0; i < m->L.size(); i++) {
-            if (m->L[i] > t->C[i]) {
-                t->C[i] = m->L[i];
-            }
-        }
-
+        for (size_t i = 0; i < m->L.size(); i++)
+            if (m->L[i] > t->C[i]) t->C[i] = m->L[i];
         t->epoch = make_epoch(t->tid, t->C[t->tid]);
     }
 

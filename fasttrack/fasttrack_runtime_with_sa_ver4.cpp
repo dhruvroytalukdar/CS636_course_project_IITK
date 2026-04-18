@@ -61,11 +61,13 @@ struct VarState {
     // ── SA layer ──────────────────────────────────────────────────
     ShareState  share_state { ShareState::UNACCESSED };
     int         owner_tid   { -1 };
+    std::vector<Epoch> shared_accessors;
+
 
     // ── FT layer ──────────────────────────────────────────────────
-    Epoch W { 0 };            // last-write epoch
-    Epoch R { 0 };            // last-read epoch (or READ_SHARED sentinel)
-    std::vector<Epoch> Rvc;   // per-thread read epochs when R == READ_SHARED
+    Epoch W { 0 };
+    Epoch R { 0 };
+    std::vector<Epoch> Rvc;
 
     std::recursive_mutex mtx;
 };
@@ -101,6 +103,12 @@ static std::recursive_mutex& get_lock_registry_lock() {
 static std::unordered_map<void*, LockState*>& get_shadow_locks() {
     static auto* m = new std::unordered_map<void*, LockState*>(); return *m;
 }
+static std::shared_mutex& get_shared_vars_lock() {
+    static std::shared_mutex m; return m;
+}
+static std::unordered_set<VarState*>& get_shared_vars() {
+    static auto* s = new std::unordered_set<VarState*>(); return *s;
+}
 
 // ──────────────────────────────────────────────────────────────────
 // 5. INFRASTRUCTURE HELPERS
@@ -118,7 +126,7 @@ static ThreadState* get_current_thread() {
 }
 
 static VarState* get_var_state(void* addr) {
-    uintptr_t key  = (uintptr_t)addr >> 2 + 1;
+    uintptr_t key  = ((uintptr_t)addr >> 2) + 1;
     size_t    slot = (key * 2654435761ULL) & SHADOW_MASK;
 
     for (;;) {
@@ -180,6 +188,35 @@ static void vec_set_epoch(std::vector<Epoch>& v, int idx, Epoch val) {
 static bool hb_before(ThreadState* t, int owner_tid, int owner_clock) {
     if (t->tid == owner_tid) return true;
     return t->get_clock_of(owner_tid) >= owner_clock;
+}
+
+static void try_reclaim_ownership(ThreadState* t) {
+    std::lock_guard<std::shared_mutex> sl(get_shared_vars_lock());
+    auto& sv = get_shared_vars();
+
+    for (auto it = sv.begin(); it != sv.end(); ) {
+        VarState* x = *it;
+        std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
+
+        bool can_reclaim = true;
+        for (int u = 0; u < (int)x->shared_accessors.size(); ++u) {
+            Epoch e = x->shared_accessors[u];
+            if (e == 0) continue;
+            if (!hb_before(t, u, get_clock(e))) {
+                can_reclaim = false;
+                break;
+            }
+        }
+
+        if (can_reclaim) {
+            x->share_state = ShareState::OWNED_WRITE;
+            x->owner_tid   = t->tid;
+            x->shared_accessors.clear();
+            it = sv.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -298,10 +335,20 @@ void __ft_read(void* addr, int line_no) {
             // Different thread. Transition to SHARED.
             // W and R are already accurate from the owner's phase.
             x->share_state = ShareState::SHARED;
+            {
+                std::lock_guard<std::shared_mutex> sl(get_shared_vars_lock());
+                get_shared_vars().insert(x);
+            }
+            vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
             ft_read_core(addr, line_no, x, t);
             return;
 
-        case ShareState::SHARED: 
+        case ShareState::SHARED:
+            // vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
+            if (x->shared_accessors.size() <= (size_t)t->tid ||
+                x->shared_accessors[t->tid] != t->epoch) {
+                vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
+            }
             ft_read_core(addr, line_no, x, t);
             return;
     }
@@ -334,10 +381,20 @@ void __ft_write(void* addr, int line_no) {
 
             // Different thread. Transition to SHARED.
             x->share_state = ShareState::SHARED;
+            {
+                std::lock_guard<std::shared_mutex> sl(get_shared_vars_lock());
+                get_shared_vars().insert(x);
+            }
+            vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
             ft_write_core(addr, line_no, x, t);
             return;
 
-        case ShareState::SHARED: 
+        case ShareState::SHARED:
+            // vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
+            if (x->shared_accessors.size() <= (size_t)t->tid ||
+                x->shared_accessors[t->tid] != t->epoch) {
+                vec_set_epoch(x->shared_accessors, t->tid, t->epoch);
+            }
             ft_write_core(addr, line_no, x, t);
             return;
     }
@@ -372,18 +429,19 @@ void* thread_wrapper(void* raw_args) {
     {
         std::lock_guard<std::recursive_mutex> lk(child->mtx);
         child->C = ctx->parent_vc_snapshot;
-        if (child->tid >= (int)child->C.size())
+        if ((size_t)child->tid >= child->C.size())
             child->C.resize(child->tid + 1, 0);
         child->C[child->tid] = 1;
         child->epoch = make_epoch(child->tid, child->C[child->tid]);
     }
+ 
     void* result = ctx->original_routine(ctx->original_arg);
     delete ctx;
     tl_thread_state = nullptr;
     return result;
 }
 
-void __ft_thread_create(uint64_t /*child_id_raw*/) {
+void __ft_thread_create(uint64_t child_id_raw) {
     // ThreadState* parent = get_current_thread();
     // std::lock_guard<std::recursive_mutex> lk(parent->mtx);
     // parent->C[parent->tid]++;
@@ -414,6 +472,9 @@ void __ft_thread_join(uint64_t child_raw_id) {
             if (child->C[i] > parent->C[i]) parent->C[i] = child->C[i];
         parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
     }
+
+    try_reclaim_ownership(parent);
+
     {
         std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
         get_threads_map().erase(it);
@@ -428,14 +489,19 @@ void __ft_thread_join(uint64_t child_raw_id) {
 
 void __ft_lock(void* mutex_addr) {
     ThreadState* t = get_current_thread();
-    LockState*   m = get_lock_state(mutex_addr);
-    std::lock_guard<std::recursive_mutex> lm(m->mtx);
-    std::lock_guard<std::recursive_mutex> lt(t->mtx);
-    if (m->L.size() > t->C.size()) t->C.resize(m->L.size(), 0);
-    for (size_t i = 0; i < m->L.size(); ++i)
+    LockState* m = get_lock_state(mutex_addr);
+ 
+    std::lock_guard<std::recursive_mutex> lock(m->mtx);
+    std::lock_guard<std::recursive_mutex> lock2(t->mtx);
+ 
+    // FT vector clock merge (unchanged)
+    if (m->L.size() > t->C.size())
+        t->C.resize(m->L.size(), 0);
+    for (size_t i = 0; i < m->L.size(); i++)
         if (m->L[i] > t->C[i]) t->C[i] = m->L[i];
     t->epoch = make_epoch(t->tid, t->C[t->tid]);
 }
+
 
 void __ft_unlock(void* mutex_addr) {
     ThreadState* t = get_current_thread();

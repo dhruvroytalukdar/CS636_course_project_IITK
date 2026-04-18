@@ -21,6 +21,13 @@
 #include "llvm/IR/InstrTypes.h" 
 using namespace llvm;
 
+#define RUNTIME 1
+//runtime = 1 dhruv Ft 
+//runtime = 2 wcp 
+//runtime = 3 my Ft
+
+
+
 /*TODO : right now the analysis generates some false negatives in some non trivial cases
  * the root creation, direct string comparision may fail if pthread_create called some other way.
  * but the root creation step is sound and conservative.
@@ -171,7 +178,7 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     if (Load->getType()->isPointerTy()) {
                         // If P is shared, the loaded pointer SSA value becomes shared.
                         DependencyGraph[P].insert(Load);
-                        DependencyGraph[Load].insert(P);
+                        // DependencyGraph[Load].insert(P);
                     }
                 }
                 // 3. GET ELEMENT PTR (Struct/Array field access)
@@ -245,83 +252,84 @@ if (Callee && Callee->getName().contains("setter")) {
         Call->getArgOperand(i)->printAsOperand(errs(), false);
         errs() << "\n";
     }
- }               //    if (isBlackBox && !isSafe){
+ }          
+   if (isBlackBox && !isSafe){
 
-//     // Collect all non-nocapture pointer args
-//     SmallVector<Value*, 8> EscapingPtrArgs;
-//     for (unsigned i = 0; i < Call->arg_size(); ++i) {
-//         Value *Arg = Call->getArgOperand(i);
-//         if (!Arg->getType()->isPointerTy()) continue;
-//         if (Call->paramHasAttr(i, Attribute::NoCapture)) continue;
-//         EscapingPtrArgs.push_back(Arg);
+    // Collect all non-nocapture pointer args
+    SmallVector<Value*, 8> EscapingPtrArgs;
+    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+        Value *Arg = Call->getArgOperand(i);
+        if (!Arg->getType()->isPointerTy()) continue;
+        if (Call->paramHasAttr(i, Attribute::NoCapture)) continue;
+        EscapingPtrArgs.push_back(Arg);
         
-//         // Keep the immediate-globals fast path: if a global is directly 
-//         // passed, it's already shared and we can mark others immediately
-//         if (SharedSet.count(Arg)) {
-//             for (Value *Other : EscapingPtrArgs)
-//                 SharedSet.insert(Other);
-//         }
-//     }
+        // Keep the immediate-globals fast path: if a global is directly 
+        // passed, it's already shared and we can mark others immediately
+        if (SharedSet.count(Arg)) {
+            for (Value *Other : EscapingPtrArgs)
+                SharedSet.insert(Other);
+        }
+    }
 
-//     // THE KEY FIX: add bidirectional edges between all escaping ptr args.
-//     // This way, when any arg becomes shared via later propagation,
-//     // all others become shared too — no timing dependency on SharedSet state.
-//     for (Value *A : EscapingPtrArgs) {
-//         for (Value *B : EscapingPtrArgs) {
-//             if (A != B) {
-//                 DependencyGraph[A].insert(B);  // if A becomes shared → B shared
-//             }
-//         }
-//     }
+    // THE KEY FIX: add bidirectional edges between all escaping ptr args.
+    // This way, when any arg becomes shared via later propagation,
+    // all others become shared too — no timing dependency on SharedSet state.
+    for (Value *A : EscapingPtrArgs) {
+        for (Value *B : EscapingPtrArgs) {
+            if (A != B) {
+                DependencyGraph[A].insert(B);  // if A becomes shared → B shared
+            }
+        }
+    }
 
-//     // Return value
-//     if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
-//         for (Value *A : EscapingPtrArgs)
-//             DependencyGraph[A].insert(Call);
-//         SharedSet.insert(Call);
-//     }
-// }
-                    if (isBlackBox && !isSafe) {
-                        //being conservative 
-                        //
+    // Return value
+    if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
+        for (Value *A : EscapingPtrArgs)
+            DependencyGraph[A].insert(Call);
+        SharedSet.insert(Call);
+    }
+}
+                    //if (isBlackBox && !isSafe) {
+                    //    //being conservative 
+                    //    //
                         
                         
-                        // errs() << Call->getName() << "\n"; 
+                    //    // errs() << Call->getName() << "\n"; 
                         
-                        bool anyArgShared = false;
-                        for (unsigned i = 0; i < Call->arg_size(); ++i) {
-                            if (Call->getArgOperand(i)->getType()->isPointerTy() &&
-                                SharedSet.count(Call->getArgOperand(i))) {
-                                anyArgShared = true;
-                                break;
-                            }
-                        }
-                        for (unsigned i = 0; i < Call->arg_size(); ++i) {
-                           Value *ActualArg = Call->getArgOperand(i);
-                            if (!ActualArg->getType()->isPointerTy()) continue; 
-                        bool mayEscape = !Call->paramHasAttr(i, Attribute::NoCapture) || anyArgShared;  
-                            if (mayEscape) {
+                    //    bool anyArgShared = false;
+                    //    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+                    //        if (Call->getArgOperand(i)->getType()->isPointerTy() &&
+                    //            SharedSet.count(Call->getArgOperand(i))) {
+                    //            anyArgShared = true;
+                    //            break;
+                    //        }
+                    //    }
+                    //    for (unsigned i = 0; i < Call->arg_size(); ++i) {
+                    //       Value *ActualArg = Call->getArgOperand(i);
+                    //        if (!ActualArg->getType()->isPointerTy()) continue; 
+                    //    bool mayEscape = !Call->paramHasAttr(i, Attribute::NoCapture) || anyArgShared;  
+                    //        if (mayEscape) {
                                 
-                                // Check if LLVM guarantees this argument doesn't escape
-                                // In modern LLVM, we check the parameter attributes on the CallBase
+                    //            // Check if LLVM guarantees this argument doesn't escape
+                    //            // In modern LLVM, we check the parameter attributes on the CallBase
                                     
-                                    // The pointer might escape! 
-                                    // It becomes a new ROOT of shared memory.
-                                SharedSet.insert(ActualArg);
-                                        // If you evaluate this during the graph-building phase, 
-                                        // you must ensure ActualArg gets pushed to your Worklist later!
-                            }
-                        }
+                    //                // The pointer might escape! 
+                    //                // It becomes a new ROOT of shared memory.
+                    //            SharedSet.insert(ActualArg);
+                    //                    // If you evaluate this during the graph-building phase, 
+                    //                    // you must ensure ActualArg gets pushed to your Worklist later!
+                    //        }
+                    //    }
                         
-                        // Note on Return Values: If a black box returns a pointer (e.g., void* p = unknown()), 
-                        // it might be returning a pointer to shared global memory. 
-                        // For strict soundness, the CallInst itself should also be added to the SharedSet.
-                        if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
-                             SharedSet.insert(Call);
+                    //    // Note on Return Values: If a black box returns a pointer (e.g., void* p = unknown()), 
+                    //    // it might be returning a pointer to shared global memory. 
+                    //    // For strict soundness, the CallInst itself should also be added to the SharedSet.
+                    //    if (Call->getType()->isPointerTy() && !Call->hasRetAttr(Attribute::NoAlias)) {
+                    //         SharedSet.insert(Call);
                              
                         
-                        } 
-                    }
+                    //    } 
+                    //}
                         
                     // Skip indirect calls and external declarations (unless modeling them)
                     // external declaration and library calls are black box assume escaped.
@@ -395,6 +403,7 @@ unsigned long num_loads;
 unsigned long num_stores;
 unsigned instrumented_loads;
 unsigned instrumented_stores;
+#if RUNTIME == 1
 void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module &M) {
     LLVMContext &Ctx = M.getContext();
         const DataLayout &DL = M.getDataLayout();
@@ -623,6 +632,477 @@ void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module 
         }
     }
 }
+#elif RUNTIME == 2
+void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module &M) {
+    LLVMContext &Ctx = M.getContext();
+        const DataLayout &DL = M.getDataLayout();
+
+        Type *VoidTy    = Type::getVoidTy(Ctx);
+        Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
+        Type *Int64Ty   = Type::getInt64Ty(Ctx);
+        Type *Int8PtrTy = PointerType::getUnqual(Ctx);
+
+        // ---- Runtime hooks ----
+        FunctionCallee FtRead  =
+            M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int8PtrTy);
+        FunctionCallee FtWrite =
+            M.getOrInsertFunction("__wcp_write", VoidTy, VoidPtrTy, Int8PtrTy);
+        FunctionCallee FtLock  =
+            M.getOrInsertFunction("__wcp_lock", VoidTy, VoidPtrTy);
+        FunctionCallee FtUnlock =
+            M.getOrInsertFunction("__wcp_unlock", VoidTy, VoidPtrTy);
+        FunctionCallee FtThreadCreate =
+            M.getOrInsertFunction("__wcp_thread_create", VoidTy, Int64Ty);
+        FunctionCallee FtThreadJoin =
+            M.getOrInsertFunction("__wcp_thread_join", VoidTy, Int64Ty);
+
+        FunctionCallee FtPrepareContext = M.getOrInsertFunction(
+            "__wcp_prepare_context", 
+            VoidPtrTy,
+            VoidPtrTy,
+            VoidPtrTy
+        );
+
+        // ---- pthread_create wrapper ----
+        FunctionCallee ThreadWrapper =
+            M.getOrInsertFunction("thread_wrapper",
+                                  VoidPtrTy, VoidPtrTy);
+    AAResults &AA = FAM.getResult<AAManager>(F);
+
+    // 2. Build a LocalSharedSet: Only Values valid in the context of F
+    SmallVector<Value *, 16> LocalSharedPointers;
+    for (Value *V : SharedSet) {
+        if (isa<GlobalValue>(V)) {
+            LocalSharedPointers.push_back(V);
+        } else if (auto *Arg = dyn_cast<Argument>(V)) {
+            if (Arg->getParent() == &F) LocalSharedPointers.push_back(V);
+        } else if (auto *Inst = dyn_cast<Instruction>(V)) {
+            if (Inst->getFunction() == &F) LocalSharedPointers.push_back(V);
+        }
+    }
+
+    // 3. Iterate over memory accesses in the function
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            
+            Value *AccessPtr = nullptr;
+            MemoryLocation AccessLoc;
+            bool isload = false;
+            bool isstore = false;
+            if (auto *Load = dyn_cast<LoadInst>(&I)) {
+                AccessPtr = Load->getPointerOperand();
+                AccessLoc = MemoryLocation::get(Load);
+                isload = true;
+            } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+                AccessPtr = Store->getPointerOperand();
+                AccessLoc = MemoryLocation::get(Store);
+                isstore = true;
+            }else{
+                 // ---------------- CALL / INVOKE ----------------
+                    auto *CB = dyn_cast<CallBase>(&I);
+                    if (!CB)
+                        continue;
+
+                    Value *Callee =
+                        CB->getCalledOperand()->stripPointerCasts();
+                    Function *CalledFunc =
+                        dyn_cast<Function>(Callee);
+                    if (!CalledFunc)
+                        continue;
+
+                    StringRef Name = CalledFunc->getName();
+
+                    // ---- pthread_mutex_lock ----
+                    if (Name.contains("pthread_mutex_lock")) {
+                        IRBuilder<> B(CB->getNextNode());
+                        B.CreateCall(FtLock,
+                                     {CB->getArgOperand(0)});
+                        continue;
+                    }
+
+                    // ---- pthread_mutex_unlock ----
+                    if (Name.contains("pthread_mutex_unlock")) {
+                        IRBuilder<> B(CB);
+                        B.CreateCall(FtUnlock,
+                                     {CB->getArgOperand(0)});
+                        continue;
+                    }
+
+                    // ---- pthread_join ----
+                    if (Name.contains("pthread_join")) {
+                        // We insert AFTER the join call returns.
+                        // This represents the point where Parent is guaranteed that Child has finished.
+                        IRBuilder<> B(CB->getNextNode());
+
+                        // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
+                        Value *ChildRawId = CB->getArgOperand(0);
+
+                        // Inject call: __wcp_thread_join(child_pthread_t)
+                        // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
+                        B.CreateCall(FtThreadJoin, {ChildRawId});
+
+                        continue;
+                    }
+
+                    // ---- pthread_create ----
+                    if (Name.contains("pthread_create")) {
+
+                        // -------------------------------------------------
+                        // PART 1: PRE-CALL INSTRUMENTATION
+                        // -------------------------------------------------
+                        IRBuilder<> PreBuilder(CB);
+
+                        // 1. Get the original function (Arg 2) and original argument (Arg 3)
+                        Value *OrigFunc = CB->getArgOperand(2);
+                        Value *OrigArg  = CB->getArgOperand(3);
+
+                        // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
+                        // This helper will:
+                        //    a) Allocate the ThreadContext (using 'new')
+                        //    b) Snapshot the Parent's Vector Clock
+                        //    c) Return the pointer to the context
+                        Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
+
+                        // 3. SWAP ARGUMENTS
+                        // Replace the function with our wrapper
+                        CB->setArgOperand(2, ThreadWrapper.getCallee());
+                        // Replace the argument with the context returned by our helper
+                        CB->setArgOperand(3, CtxMem);
+
+
+                        IRBuilder<> PostBuilder(CB->getNextNode());
+
+                        Value *ThreadIdPtr = CB->getArgOperand(0);
+                        Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
+
+                        PostBuilder.CreateCall(FtThreadCreate, {ChildId});
+
+                        continue;
+                    }
+
+                    continue;
+            }
+
+            // 4. Fast path: Is the pointer exactly in our SharedSet?
+            bool isShared = SharedSet.count(AccessPtr);
+
+            // 5. Slow path: Alias Analysis
+            if (!isShared) {
+                for (Value *SharedPtr : LocalSharedPointers) {
+                    
+                    // Construct a MemoryLocation for the shared pointer.
+                    // If we don't know the exact size of the shared allocation, we use LocationSize::beforeOrAfterPointer()
+                    MemoryLocation SharedLoc(SharedPtr, LocationSize::beforeOrAfterPointer());
+
+                    AliasResult AR = AA.alias(AccessLoc, SharedLoc);
+
+                    if (AR != AliasResult::NoAlias) {
+                        isShared = true;
+                        
+                        // Optimization: Add to SharedSet so future identical pointers hit the Fast Path
+                        SharedSet.insert(AccessPtr); 
+                        LocalSharedPointers.push_back(AccessPtr);
+                        break; 
+                    }
+                }
+            }
+
+            // 6. Instrument if it escapes or aliases with an escaping pointer
+            if (isShared) {
+                
+
+                    // ---------------- LOAD ----------------
+                    if (isload) {
+                        IRBuilder<> B(&I); // Insert before the load
+                        instrumented_loads++;
+                        // 1. Get the IR Instruction as a std::string
+                        std::string Str;
+                        raw_string_ostream RSO(Str);
+                        I.print(RSO); // Dump instruction to stream
+
+                        // 2. Create a Global String Constant in the module
+                        // This returns a Value* (Constant*) pointing to the string
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+
+                        // 3. Pass it to the runtime
+                        B.CreateCall(FtRead, {AccessPtr, IrStringPtr});
+
+                        continue;
+                    }
+
+                    // ---------------- STORE ----------------
+                    if (isstore) {
+                        IRBuilder<> B(&I);
+                        instrumented_stores++;
+                        std::string Str;
+                        raw_string_ostream RSO(Str);
+                        I.print(RSO);
+
+                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+
+                        B.CreateCall(FtWrite, {AccessPtr, IrStringPtr});
+                        continue;
+                    }
+
+                                    
+                // if(auto *LI = dyn_cast<LoadInst>(&I)){
+                //         IRBuilder<> Builder(LI); //BEFORE
+                //         Builder.CreateCall(LogLoad, {LI->getPointerOperand()});
+                //         instrumented_loads++;
+                // }
+                    
+                //  else if(auto *SI = dyn_cast<StoreInst>(&I)){
+                //         IRBuilder<> Builder(SI); //BEFORE
+                //         Builder.CreateCall(LogStore, {SI->getPointerOperand()});
+                //         instrumented_stores++;
+                // }
+
+            }
+        }
+    }
+}
+
+#elif RUNTIME == 3
+void instrumentSharedAccesses(Function &F, FunctionAnalysisManager &FAM, Module &M) {
+    LLVMContext &Ctx = M.getContext();
+        const DataLayout &DL = M.getDataLayout();
+
+        // Type *VoidTy    = Type::getVoidTy(Ctx);
+        // Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
+        // Type *Int64Ty   = Type::getInt64Ty(Ctx);
+        // Type *Int8PtrTy = PointerType::getUnqual(Ctx);
+
+        // // ---- Runtime hooks ----
+        // FunctionCallee FtRead  =
+        //     M.getOrInsertFunction("__log_load", VoidTy, VoidPtrTy, Int8PtrTy);
+        // FunctionCallee FtWrite =
+        //     M.getOrInsertFunction("__log_store", VoidTy, VoidPtrTy, Int8PtrTy);
+        // FunctionCallee FtLock  =
+        //     M.getOrInsertFunction("__log_lock", VoidTy, VoidPtrTy);
+        // FunctionCallee FtUnlock =
+        //     M.getOrInsertFunction("__log_unlock", VoidTy, VoidPtrTy);
+       
+        Type *VoidTy = Type::getVoidTy(Ctx);
+        Type *PtrTy = PointerType::getUnqual(Ctx); 
+
+        //define hooks
+        //void __race_log_load(void* addr)
+        FunctionCallee LogLoad = M.getOrInsertFunction("__log_load", VoidTy, PtrTy);
+        
+        //void __race_log_store(void* addr)
+        FunctionCallee LogStore = M.getOrInsertFunction("__log_store", VoidTy, PtrTy);
+
+        //void __race_log_lock(void* mutex)
+        FunctionCallee LogLock = M.getOrInsertFunction("__log_lock", VoidTy, PtrTy);
+
+        //void __race_log_unlock(void* mutex)
+        FunctionCallee LogUnlock = M.getOrInsertFunction("__log_unlock", VoidTy, PtrTy);
+        // FunctionCallee FtThreadCreate =
+        //     // M.getOrInsertFunction("__ft_thread_create", VoidTy, Int64Ty);
+        // FunctionCallee FtThreadJoin =
+        //     M.getOrInsertFunction("__ft_thread_join", VoidTy, Int64Ty);
+
+//         FunctionCallee FtPrepareContext = M.getOrInsertFunction(
+//             "__ft_prepare_context", 
+//             VoidPtrTy,
+//             VoidPtrTy,
+//             VoidPtrTy
+//         );
+
+//         // ---- pthread_create wrapper ----
+//         FunctionCallee ThreadWrapper =
+//             M.getOrInsertFunction("thread_wrapper",
+//                                   VoidPtrTy, VoidPtrTy);
+    AAResults &AA = FAM.getResult<AAManager>(F);
+
+    // 2. Build a LocalSharedSet: Only Values valid in the context of F
+    SmallVector<Value *, 16> LocalSharedPointers;
+    for (Value *V : SharedSet) {
+        if (isa<GlobalValue>(V)) {
+            LocalSharedPointers.push_back(V);
+        } else if (auto *Arg = dyn_cast<Argument>(V)) {
+            if (Arg->getParent() == &F) LocalSharedPointers.push_back(V);
+        } else if (auto *Inst = dyn_cast<Instruction>(V)) {
+            if (Inst->getFunction() == &F) LocalSharedPointers.push_back(V);
+        }
+    }
+
+    // 3. Iterate over memory accesses in the function
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            
+            Value *AccessPtr = nullptr;
+            MemoryLocation AccessLoc;
+            bool isload = false;
+            bool isstore = false;
+            if (auto *Load = dyn_cast<LoadInst>(&I)) {
+                AccessPtr = Load->getPointerOperand();
+                AccessLoc = MemoryLocation::get(Load);
+                isload = true;
+            } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+                AccessPtr = Store->getPointerOperand();
+                AccessLoc = MemoryLocation::get(Store);
+                isstore = true;
+            }else{
+                 // ---------------- CALL / INVOKE ----------------
+                    auto *CB = dyn_cast<CallBase>(&I);
+                    if (!CB)
+                        continue;
+
+                    Value *Callee =
+                        CB->getCalledOperand()->stripPointerCasts();
+                    Function *CalledFunc =
+                        dyn_cast<Function>(Callee);
+                    if (!CalledFunc)
+                        continue;
+
+                    StringRef Name = CalledFunc->getName();
+
+                    // ---- pthread_mutex_lock ----
+                    if (Name.contains("pthread_mutex_lock")) {
+                        IRBuilder<> B(CB->getNextNode());
+                        B.CreateCall(LogLock,
+                                     {CB->getArgOperand(0)});
+                        continue;
+                    }
+
+                    // ---- pthread_mutex_unlock ----
+                    if (Name.contains("pthread_mutex_unlock")) {
+                        IRBuilder<> B(CB);
+                        B.CreateCall(LogUnlock,
+                                     {CB->getArgOperand(0)});
+                        continue;
+                    }
+
+                    // // ---- pthread_join ----
+                    // if (Name.contains("pthread_join")) {
+                    //     // We insert AFTER the join call returns.
+                    //     // This represents the point where Parent is guaranteed that Child has finished.
+                    //     IRBuilder<> B(CB->getNextNode());
+
+                    //     // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
+                    //     Value *ChildRawId = CB->getArgOperand(0);
+
+                    //     // Inject call: __wcp_thread_join(child_pthread_t)
+                    //     // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
+                    //     B.CreateCall(FtThreadJoin, {ChildRawId});
+
+                    //     continue;
+                    // }
+
+                    // // ---- pthread_create ----
+                    // if (Name.contains("pthread_create")) {
+
+                    //     // -------------------------------------------------
+                    //     // PART 1: PRE-CALL INSTRUMENTATION
+                    //     // -------------------------------------------------
+                    //     IRBuilder<> PreBuilder(CB);
+
+                    //     // 1. Get the original function (Arg 2) and original argument (Arg 3)
+                    //     Value *OrigFunc = CB->getArgOperand(2);
+                    //     Value *OrigArg  = CB->getArgOperand(3);
+
+                    //     // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
+                    //     // This helper will:
+                    //     //    a) Allocate the ThreadContext (using 'new')
+                    //     //    b) Snapshot the Parent's Vector Clock
+                    //     //    c) Return the pointer to the context
+                    //     Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
+
+                    //     // 3. SWAP ARGUMENTS
+                    //     // Replace the function with our wrapper
+                    //     CB->setArgOperand(2, ThreadWrapper.getCallee());
+                    //     // Replace the argument with the context returned by our helper
+                    //     CB->setArgOperand(3, CtxMem);
+
+
+                    //     IRBuilder<> PostBuilder(CB->getNextNode());
+
+                    //     Value *ThreadIdPtr = CB->getArgOperand(0);
+                    //     Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
+
+                    //     PostBuilder.CreateCall(FtThreadCreate, {ChildId});
+
+                    //     continue;
+                    // }
+
+                    continue;
+            }
+
+            // 4. Fast path: Is the pointer exactly in our SharedSet?
+            bool isShared = SharedSet.count(AccessPtr);
+
+            // 5. Slow path: Alias Analysis
+            if (!isShared) {
+                for (Value *SharedPtr : LocalSharedPointers) {
+                    
+                    // Construct a MemoryLocation for the shared pointer.
+                    // If we don't know the exact size of the shared allocation, we use LocationSize::beforeOrAfterPointer()
+                    MemoryLocation SharedLoc(SharedPtr, LocationSize::beforeOrAfterPointer());
+
+                    AliasResult AR = AA.alias(AccessLoc, SharedLoc);
+
+                    if (AR != AliasResult::NoAlias) {
+                        isShared = true;
+                        
+                        // Optimization: Add to SharedSet so future identical pointers hit the Fast Path
+                        SharedSet.insert(AccessPtr); 
+                        LocalSharedPointers.push_back(AccessPtr);
+                        break; 
+                    }
+                }
+            }
+
+            // 6. Instrument if it escapes or aliases with an escaping pointer
+            if (isShared) {
+                
+
+                    // ---------------- LOAD ----------------
+                    if (isload) {
+                        instrumented_loads++;
+                        auto *LI = dyn_cast<LoadInst>(&I);
+                        // 1. Get the IR Instruction as a std::string
+                        // std::string Str;
+                        // raw_string_ostream RSO(Str);
+                        // I.print(RSO); // Dump instruction to stream
+                        IRBuilder<> Builder(LI); //BEFORE
+                        Builder.CreateCall(LogLoad, {LI->getPointerOperand()});
+
+                        // 2. Create a Global String Constant in the module
+                        // This returns a Value* (Constant*) pointing to the string
+
+                        // 3. Pass it to the runtime
+
+                        continue;
+                    }
+
+                    // ---------------- STORE ----------------
+                    if (isstore) {
+                        auto *SI = dyn_cast<StoreInst>(&I);
+                        instrumented_stores++;
+                        IRBuilder<> Builder(SI); //BEFORE
+                        Builder.CreateCall(LogStore, {SI->getPointerOperand()});
+                        continue;
+                    }
+
+                                    
+                // if(auto *LI = dyn_cast<LoadInst>(&I)){
+                //         IRBuilder<> Builder(LI); //BEFORE
+                //         Builder.CreateCall(LogLoad, {LI->getPointerOperand()});
+                //         instrumented_loads++;
+                // }
+                    
+                //  else if(auto *SI = dyn_cast<StoreInst>(&I)){
+                //         IRBuilder<> Builder(SI); //BEFORE
+                //         Builder.CreateCall(LogStore, {SI->getPointerOperand()});
+                //         instrumented_stores++;
+                // }
+
+            }
+        }
+    }
+}
+#endif
 bool isKnownSafeLibCall(StringRef FuncName) {
     // Add functions that you know DO NOT capture pointers
     return FuncName == "printf" || FuncName == "puts" || 
