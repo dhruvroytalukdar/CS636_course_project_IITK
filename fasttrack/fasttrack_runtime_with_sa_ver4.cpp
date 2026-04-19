@@ -473,7 +473,7 @@ void __ft_thread_join(uint64_t child_raw_id) {
         parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
     }
 
-    try_reclaim_ownership(parent);
+    // try_reclaim_ownership(parent);
 
     {
         std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
