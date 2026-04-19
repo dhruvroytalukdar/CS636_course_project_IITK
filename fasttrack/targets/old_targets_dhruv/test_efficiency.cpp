@@ -6,7 +6,7 @@
 #include <time.h>
 
 #define NUM_THREADS     8
-#define SOLO_ITERS      1000000
+#define SOLO_ITERS      10000000
 #define SHARED_ITERS    100
 
 struct PaddedLong {
