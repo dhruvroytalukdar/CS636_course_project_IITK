@@ -14,9 +14,12 @@ PASS_NAME      := fasttrack-pass
 
 ESCAPE_PASS_SRC := escape_instrumentation.cpp
 
+# TARGET_DIR     := targets/old_targets_dhruv
+TARGET_DIR     := targets/new_targets_dhruv/race
+
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa_ver4.cpp
-TARGET_SRC     := test_efficiency.cpp
+TARGET_SRC     := $(TARGET_DIR)/prog1.cpp
 
 # ──────────────────────────────────────────────────────────────────
 # BUILD DIRECTORY — all generated files live here
