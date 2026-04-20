@@ -1,52 +1,105 @@
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
+// =============================================================================
+// wcp_instrumentation.cpp
+//
+// LLVM Module Pass that instruments a program for WCP (Weak-Causally-Precedes)
+// race detection (Kini, Mathur, Viswanathan — PLDI 2017).
+//
+// The pass mirrors the FastTrack instrumentation pass exactly in structure,
+// but wires up the WCP runtime hooks instead.
+//
+// Runtime hooks declared here (defined in wcp_runtime.cpp):
+//
+//   void __wcp_read (void* addr, int line_no)
+//   void __wcp_write(void* addr, int line_no)
+//   void __wcp_lock (void* mutex_addr)
+//   void __wcp_unlock(void* mutex_addr)
+//   void __wcp_thread_create(uint64_t child_pthread_t)
+//   void __wcp_thread_join  (uint64_t child_pthread_t)
+//   void*__wcp_prepare_context(void* routine, void* arg)
+//
+// The pthread_create call is rewritten to go through thread_wrapper
+// (same trampoline pattern used by FastTrack) so the runtime can
+// initialise child thread state with a snapshot of the parent's clocks.
+//
+// Key difference from FastTrack:
+//   __wcp_read / __wcp_write also need to know WHICH locks currently enclose
+//   the access (the set L from Algorithm 1, lines 11-12).  We track the
+//   lock-nesting stack per thread inside the runtime itself, so the
+//   instrumentation pass does NOT need to pass extra arguments — the runtime
+//   maintains its own per-thread lock set.
+// =============================================================================
+
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
 
 namespace {
-// Define the pass
-struct InstrumentMemoryPass : public PassInfoMixin<InstrumentMemoryPass> {
-unsigned long num_loads;
-unsigned long num_stores;
+
+struct WCPPass : public PassInfoMixin<WCPPass> {
 
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
+
         LLVMContext &Ctx = M.getContext();
-        const DataLayout &DL = M.getDataLayout();
 
         Type *VoidTy    = Type::getVoidTy(Ctx);
         Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
         Type *Int64Ty   = Type::getInt64Ty(Ctx);
-        Type *Int8PtrTy = PointerType::getUnqual(Ctx);
+        Type *Int32Ty   = Type::getInt32Ty(Ctx);
 
-        // ---- Runtime hooks ----
-        FunctionCallee FtRead  =
-            M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int8PtrTy);
-        FunctionCallee FtWrite =
-            M.getOrInsertFunction("__wcp_write", VoidTy, VoidPtrTy, Int8PtrTy);
-        FunctionCallee FtLock  =
+        // ----------------------------------------------------------------
+        // Runtime hook declarations
+        // ----------------------------------------------------------------
+
+        // void __wcp_read(void* addr, int line_no)
+        FunctionCallee WcpRead =
+            M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int32Ty);
+
+        // void __wcp_write(void* addr, int line_no)
+        FunctionCallee WcpWrite =
+            M.getOrInsertFunction("__wcp_write", VoidTy, VoidPtrTy, Int32Ty);
+
+        // void __wcp_lock(void* mutex_addr)
+        //   Called AFTER the real pthread_mutex_lock returns (lock is held).
+        FunctionCallee WcpLock =
             M.getOrInsertFunction("__wcp_lock", VoidTy, VoidPtrTy);
-        FunctionCallee FtUnlock =
+
+        // void __wcp_unlock(void* mutex_addr)
+        //   Called BEFORE the real pthread_mutex_unlock (lock is still held).
+        FunctionCallee WcpUnlock =
             M.getOrInsertFunction("__wcp_unlock", VoidTy, VoidPtrTy);
-        FunctionCallee FtThreadCreate =
+
+        // void __wcp_thread_create(uint64_t child_pthread_t)
+        //   Called AFTER pthread_create returns to record the fork edge.
+        FunctionCallee WcpThreadCreate =
             M.getOrInsertFunction("__wcp_thread_create", VoidTy, Int64Ty);
-        FunctionCallee FtThreadJoin =
+
+        // void __wcp_thread_join(uint64_t child_pthread_t)
+        //   Called AFTER pthread_join returns to merge clocks.
+        FunctionCallee WcpThreadJoin =
             M.getOrInsertFunction("__wcp_thread_join", VoidTy, Int64Ty);
 
-        FunctionCallee FtPrepareContext = M.getOrInsertFunction(
-            "__wcp_prepare_context", 
-            VoidPtrTy,
-            VoidPtrTy,
-            VoidPtrTy
-        );
+        // void* __wcp_prepare_context(void* routine, void* arg)
+        //   Called BEFORE pthread_create to snapshot parent clocks and
+        //   package them into a ThreadContext for the child.
+        FunctionCallee WcpPrepareContext =
+            M.getOrInsertFunction("__wcp_prepare_context",
+                                  VoidPtrTy, VoidPtrTy, VoidPtrTy);
 
-        // ---- pthread_create wrapper ----
+        // ----------------------------------------------------------------
+        // pthread_create trampoline (defined in wcp_runtime.cpp)
+        // ----------------------------------------------------------------
         FunctionCallee ThreadWrapper =
-            M.getOrInsertFunction("thread_wrapper",
-                                  VoidPtrTy, VoidPtrTy);
+            M.getOrInsertFunction("thread_wrapper", VoidPtrTy, VoidPtrTy);
 
+        // ----------------------------------------------------------------
+        // Instrument every instruction in every non-declaration function
+        // ----------------------------------------------------------------
         for (Function &F : M) {
             if (F.isDeclaration())
                 continue;
@@ -54,152 +107,163 @@ unsigned long num_stores;
             for (BasicBlock &BB : F) {
                 for (Instruction &I : BB) {
 
-                    // ---------------- LOAD ----------------
+                    // ============ LOAD → __wcp_read ============
                     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                        num_loads++;
-                        IRBuilder<> B(&I); // Insert before the load
-    
-                        // 1. Get the IR Instruction as a std::string
-                        std::string Str;
-                        raw_string_ostream RSO(Str);
-                        I.print(RSO); // Dump instruction to stream
-                         
-                        // 2. Create a Global String Constant in the module
-                        // This returns a Value* (Constant*) pointing to the string
-                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+                        IRBuilder<> B(&I);   // insert BEFORE the load
 
-                        // 3. Pass it to the runtime
-                        B.CreateCall(FtRead, {LI->getPointerOperand(), IrStringPtr});
-                        
+                        int line_no = 0;
+                        if (const DebugLoc &Loc = I.getDebugLoc())
+                            line_no = Loc.getLine();
+
+                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+                        B.CreateCall(WcpRead, {LI->getPointerOperand(), LineArg});
                         continue;
                     }
 
-                    // ---------------- STORE ----------------
+                    // ============ STORE → __wcp_write ============
                     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                        num_stores++;
-                        IRBuilder<> B(&I);
-                        std::string Str;
-                        raw_string_ostream RSO(Str);
-                        I.print(RSO);
-                        
-                        Value *IrStringPtr = B.CreateGlobalString(RSO.str());
+                        IRBuilder<> B(&I);   // insert BEFORE the store
 
-                        B.CreateCall(FtWrite, {SI->getPointerOperand(), IrStringPtr});
+                        int line_no = 0;
+                        if (const DebugLoc &Loc = I.getDebugLoc())
+                            line_no = Loc.getLine();
+
+                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+                        B.CreateCall(WcpWrite, {SI->getPointerOperand(), LineArg});
                         continue;
                     }
 
-                    // ---------------- CALL / INVOKE ----------------
+                    // ============ CALL / INVOKE ============
                     auto *CB = dyn_cast<CallBase>(&I);
                     if (!CB)
                         continue;
 
-                    Value *Callee =
-                        CB->getCalledOperand()->stripPointerCasts();
                     Function *CalledFunc =
-                        dyn_cast<Function>(Callee);
+                        dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
                     if (!CalledFunc)
                         continue;
 
                     StringRef Name = CalledFunc->getName();
 
                     // ---- pthread_mutex_lock ----
+                    // WCP acquire(t, ℓ):
+                    //   H_t := H_t ⊔ H_ℓ
+                    //   P_t := P_t ⊔ P_ℓ
+                    //   foreach t' ≠ t: Acq_ℓ(t').Enqueue(C_t)
+                    // We insert AFTER lock returns (lock is now held).
                     if (Name.contains("pthread_mutex_lock")) {
                         IRBuilder<> B(CB->getNextNode());
-                        B.CreateCall(FtLock,
-                                     {CB->getArgOperand(0)});
+                        B.CreateCall(WcpLock, {CB->getArgOperand(0)});
                         continue;
                     }
 
                     // ---- pthread_mutex_unlock ----
+                    // WCP release(t, ℓ, R, W):
+                    //   drain Acq_ℓ(t) queue
+                    //   update L^r / L^w tables
+                    //   H_ℓ := H_t; P_ℓ := P_t
+                    //   foreach t' ≠ t: Rel_ℓ(t').Enqueue(H_t)
+                    // We insert BEFORE unlock so the lock is still held when
+                    // the runtime reads the per-thread lock set.
                     if (Name.contains("pthread_mutex_unlock")) {
                         IRBuilder<> B(CB);
-                        B.CreateCall(FtUnlock,
-                                     {CB->getArgOperand(0)});
+                        B.CreateCall(WcpUnlock, {CB->getArgOperand(0)});
+                        continue;
+                    }
+
+                    // ---- pthread_cond_wait ----
+                    // Treat as unlock(mutex) … lock(mutex) for WCP purposes.
+                    if (Name.contains("pthread_cond_wait")) {
+                        Value *MutexArg = CB->getArgOperand(1);
+
+                        // The mutex is released when cond_wait is entered.
+                        IRBuilder<> PreB(CB);
+                        PreB.CreateCall(WcpUnlock, {MutexArg});
+
+                        // The mutex is re-acquired when cond_wait returns.
+                        IRBuilder<> PostB(CB->getNextNode());
+                        PostB.CreateCall(WcpLock, {MutexArg});
                         continue;
                     }
 
                     // ---- pthread_join ----
+                    // Fork/join rule: after join, parent merges child clocks.
+                    // Insert AFTER join returns.
                     if (Name.contains("pthread_join")) {
-                        // We insert AFTER the join call returns.
-                        // This represents the point where Parent is guaranteed that Child has finished.
                         IRBuilder<> B(CB->getNextNode());
-
-                        // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
                         Value *ChildRawId = CB->getArgOperand(0);
-
-                        // Inject call: __wcp_thread_join(child_pthread_t)
-                        // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
-                        B.CreateCall(FtThreadJoin, {ChildRawId});
-
+                        B.CreateCall(WcpThreadJoin, {ChildRawId});
                         continue;
                     }
 
                     // ---- pthread_create ----
+                    // Two-phase instrumentation (same pattern as FastTrack):
+                    //
+                    // PHASE 1 (before pthread_create):
+                    //   ctx = __wcp_prepare_context(orig_func, orig_arg)
+                    //      → snapshots parent's H, P clocks into a ThreadContext
+                    //      → increments parent's local clock (fork event)
+                    //   Rewrite pthread_create args to use thread_wrapper / ctx.
+                    //
+                    // PHASE 2 (after pthread_create):
+                    //   __wcp_thread_create(child_pthread_t)
+                    //      → records the child's pthread_t in the global map
                     if (Name.contains("pthread_create")) {
 
-                        // -------------------------------------------------
-                        // PART 1: PRE-CALL INSTRUMENTATION
-                        // -------------------------------------------------
+                        // --- Phase 1: pre-call ---
                         IRBuilder<> PreBuilder(CB);
 
-                        // 1. Get the original function (Arg 2) and original argument (Arg 3)
                         Value *OrigFunc = CB->getArgOperand(2);
                         Value *OrigArg  = CB->getArgOperand(3);
 
-                        // 2. Call the C++ Runtime Helper: __wcp_prepare_context(func, arg)
-                        // This helper will:
-                        //    a) Allocate the ThreadContext (using 'new')
-                        //    b) Snapshot the Parent's Vector Clock
-                        //    c) Return the pointer to the context
-                        Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
+                        // Build the ThreadContext on the heap and snapshot
+                        // the parent's WCP clocks.
+                        Value *CtxMem = PreBuilder.CreateCall(
+                            WcpPrepareContext, {OrigFunc, OrigArg});
 
-                        // 3. SWAP ARGUMENTS
-                        // Replace the function with our wrapper
+                        // Redirect pthread_create to our trampoline.
                         CB->setArgOperand(2, ThreadWrapper.getCallee());
-                        // Replace the argument with the context returned by our helper
                         CB->setArgOperand(3, CtxMem);
 
-
-                        // -------------------------------------------------
-                        // PART 2: POST-CALL INSTRUMENTATION
-                        // (This part remains exactly the same as you had it)
-                        // -------------------------------------------------
+                        // --- Phase 2: post-call ---
                         IRBuilder<> PostBuilder(CB->getNextNode());
 
+                        // pthread_create stores the new thread id at Arg 0.
                         Value *ThreadIdPtr = CB->getArgOperand(0);
-                        // Assuming pthread_t is 64-bit on your target
-                        Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
-                        
-                        PostBuilder.CreateCall(FtThreadCreate, {ChildId});
+                        Value *ChildId     = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
 
+                        PostBuilder.CreateCall(WcpThreadCreate, {ChildId});
                         continue;
                     }
                 }
             }
         }
-        errs() << "loads = " << num_loads << "\n";
-        errs() << "stores = " << num_stores << "\n";
 
         return PreservedAnalyses::none();
     }
-
 };
 
-}
+} // namespace
 
-// Register the pass so it can be loaded via standard 'opt'
-extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
-llvmGetPassPluginInfo() {
-    return {LLVM_PLUGIN_API_VERSION, "InstrumentMemoryPass", LLVM_VERSION_STRING,
-            [](PassBuilder &PB) {
-                PB.registerPipelineParsingCallback(
-                    [](StringRef Name, ModulePassManager &MPM,
-                       ArrayRef<PassBuilder::PipelineElement>) {
-                        if (Name == "instrument-memory") {
-                            MPM.addPass(InstrumentMemoryPass());
-                            return true;
-                        }
-                        return false;
-                    });
-            }};
+// ============================================================================
+// Plugin registration
+// ============================================================================
+extern "C" LLVM_ATTRIBUTE_WEAK
+::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return {
+        LLVM_PLUGIN_API_VERSION,
+        "WCPPass",
+        LLVM_VERSION_STRING,
+        [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name,
+                   ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    if (Name == "wcp-pass") {
+                        MPM.addPass(WCPPass());
+                        return true;
+                    }
+                    return false;
+                });
+        }};
 }

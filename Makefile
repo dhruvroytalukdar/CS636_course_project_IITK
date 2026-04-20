@@ -30,7 +30,7 @@ $(TARGET_IR): $(TARGET_SRC)
 
 # 4. Run the Pass over the Target IR using the New Pass Manager
 $(INSTRUMENTED_IR): $(TARGET_IR) $(PASS_OBJ)
-	$(OPT) -load-pass-plugin=./$(PASS_OBJ) -passes="instrument-memory" $< -S -o $@
+	$(OPT) -load-pass-plugin=./$(PASS_OBJ) -passes="wcp-pass" $< -S -o $@
 
 # 5. Compile the Instrumented IR and Link with the Runtime Library
 $(FINAL_EXEC): $(INSTRUMENTED_IR) $(RUNTIME_OBJ)
@@ -39,12 +39,6 @@ $(FINAL_EXEC): $(INSTRUMENTED_IR) $(RUNTIME_OBJ)
 # 6. Execute the final instrumented program
 run: $(FINAL_EXEC)
 	./$(FINAL_EXEC)
-
-
-clean:
-	rm -f *.so *.o *.ll
-
-	# ... (Previous variable definitions for CXX, OPT, LLVM_CXXFLAGS, etc. remain the same)
 
 # New variables for Escape Analysis
 ESCAPE_PASS_SRC = escape_instrumentation.cpp

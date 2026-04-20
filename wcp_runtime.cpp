@@ -1,227 +1,580 @@
+// =============================================================================
+// Runtime library for the WCP (Weak-Causally-Precedes) race detector.
+// =============================================================================
+//
+//   State per thread t:
+//     N_t   — local integer clock (starts at 1, incremented after each release)
+//     H_t   — vector clock: HB time of last event in t
+//     P_t   — vector clock: WCP-predecessor time of last event in t
+//     C_t   = P_t[t := N_t]
+//
+//   State per lock ℓ:
+//     H_ℓ        — HB time of last rel(ℓ) seen
+//     P_ℓ        — WCP-predecessor time of last rel(ℓ) seen
+//     Acq_ℓ(t)  — FIFO of C_t snapshots from acq(ℓ) events by threads t'≠t
+//     Rel_ℓ(t)  — FIFO of H_t snapshots from rel(ℓ) events by threads t'≠t
+//
+//   State per (lock ℓ, variable x):
+//     Lr[ℓ][x]  — join of H_t of all rel(ℓ) whose CS contained r(x)
+//     Lw[ℓ][x]  — join of H_t of all rel(ℓ) whose CS contained w(x)
+//
+//   State per variable x:
+//     Rx, Wx  — join of C_e for reads/writes (for WCP-race checking)
+//
+//   procedure acquire(t, ℓ)
+//     1: H_t := H_t ⊔ H_ℓ
+//     2: P_t := P_t ⊔ P_ℓ
+//     3: ∀ t'≠t: Acq_ℓ(t').Enqueue(C_t)
+//
+//   procedure release(t, ℓ, R, W)
+//     4-6: while Acq_ℓ(t).front() ⊑ C_t:
+//              Acq_ℓ(t).Dequeue()
+//              P_t := P_t ⊔ Rel_ℓ(t).Dequeue()
+//     7:   ∀ x∈R: Lr[ℓ][x] := Lr[ℓ][x] ⊔ H_t
+//     8:   ∀ x∈W: Lw[ℓ][x] := Lw[ℓ][x] ⊔ H_t
+//     9:   H_ℓ := H_t;  P_ℓ := P_t
+//    10:   ∀ t'≠t: Rel_ℓ(t').Enqueue(H_t)
+//          N_t++  (local clock bump after every release)
+//
+//   procedure read(t, x, L)
+//    11: P_t := P_t ⊔ (⊔_{ℓ∈L} Lw[ℓ][x])
+//        Race: ¬(Wx ⊑ C_t)  → W-R
+//        Rx := Rx ⊔ C_t
+//
+//   procedure write(t, x, L)
+//    12: P_t := P_t ⊔ (⊔_{ℓ∈L} (Lr[ℓ][x] ⊔ Lw[ℓ][x]))
+//        Race: ¬(Rx ⊑ C_t)  → R-W
+//              ¬(Wx ⊑ C_t)  → W-W
+//        Wx := Wx ⊔ C_t
+//
+// ── FORK / JOIN ──────────────────────────────────────────────────────────────
+//   fork:  parent N_t++, snapshot (H_t, P_t) → child initialises from snapshot
+//   join:  H_parent ⊔= H_child;  P_parent ⊔= P_child
+//
+// =============================================================================
+
 #include <bits/stdc++.h>
-#include <cstdio>
 #include <pthread.h>
 #include <mutex>
+#include <atomic>
+#include <cstdio>
+#include <ctime>
 
-// ==========================================
-// STATE CLASSES
-// ==========================================
+// =============================================================================
+// 1.  VECTOR-CLOCK TYPE AND HELPERS
+// =============================================================================
 
-// struct ThreadState {
-//     int tid;
-//     std::vector<int> C; 
-//     std::mutex mtx;
+using VClock = std::vector<int>;
 
-//     ThreadState(int id) : tid(id) {
-//         if(tid >= C.size()) {
-//             C.resize(tid + 1, 0);
-//         }
-//         C[tid] = 1;
-//     }
-    
-//     // Helper to get clock of any thread u
-//     int get_clock_of(int u) {
-//         if (u >= C.size()) return 0;
-//         return C[u];
-//     }
-// };
+static void vc_join(VClock &dst, const VClock &src) {
+    if (src.size() > dst.size())
+        dst.resize(src.size(), 0);
+    for (size_t i = 0; i < src.size(); i++)
+        if (src[i] > dst[i]) dst[i] = src[i];
+}
 
-// struct VarState {
-//     std::mutex mtx; // Per-variable lock for atomicity
-// };
+// Is src ⊑ dst  (point-wise ≤)
+static bool vc_leq(const VClock &src, const VClock &dst) {
+    for (size_t i = 0; i < src.size(); i++) {
+        int d = (i < dst.size()) ? dst[i] : 0;
+        if (src[i] > d) return false;
+    }
+    return true;
+}
 
-// struct LockState {
-//     std::vector<int> L;
-//     std::mutex mtx;
-// };
+static void vc_ensure(VClock &v, int idx) {
+    if ((size_t)idx >= v.size()) v.resize(idx + 1, 0);
+}
+
+// C_t = P_t with the component for tid overridden by N
+static VClock make_Ct(const VClock &P, int tid, int N) {
+    VClock C = P;
+    vc_ensure(C, tid);
+    C[tid] = N;
+    return C;
+}
+
+// Return the first index where src[i] > dst[i] (for race reporting).
+static int first_violating_tid(const VClock &src, const VClock &dst) {
+    for (size_t i = 0; i < src.size(); i++) {
+        int d = (i < dst.size()) ? dst[i] : 0;
+        if (src[i] > d) return (int)i;
+    }
+    return -1;
+}
+
+// =============================================================================
+// 2.  CRITICAL-SECTION FRAMES
+//     Tracks variable addresses accessed inside each lock's CS so that
+//     Lr / Lw can be updated at release time.
+// =============================================================================
+
+struct CSFrame {
+    void *lock_addr;
+    std::unordered_set<uintptr_t> reads; // reads inside the critical section
+    std::unordered_set<uintptr_t> writes;  // writes inside the critical section
+};
+
+static std::recursive_mutex                          g_csframe_mtx;
+static std::unordered_map<int, std::vector<CSFrame>> g_csframes;
+
+// Push a new frame when a lock is acquired.
+static void csframe_push(int tid, void *lock_addr) {
+    std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
+    g_csframes[tid].push_back({lock_addr, {}, {}});
+}
+
+// Pop the innermost frame for lock_addr; fill out_R / out_W with its sets.
+static bool csframe_pop(int tid, void *lock_addr,
+                        std::unordered_set<uintptr_t> &out_R,
+                        std::unordered_set<uintptr_t> &out_W) {
+    std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
+    auto it = g_csframes.find(tid);
+    if (it == g_csframes.end()) return false;
+    auto &stack = it->second;
+    for (int i = (int)stack.size() - 1; i >= 0; --i) {
+        if (stack[i].lock_addr == lock_addr) {
+            out_R = std::move(stack[i].reads);
+            out_W = std::move(stack[i].writes);
+            stack.erase(stack.begin() + i);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Record a read inside every currently-open CS frame for this thread.
+static void csframe_record_read(int tid, uintptr_t addr) {
+    std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
+    auto it = g_csframes.find(tid);
+    if (it == g_csframes.end()) return;
+    for (auto &frame : it->second)
+        frame.reads.insert(addr);
+}
+
+// Record a write inside every currently-open CS frame for this thread.
+static void csframe_record_write(int tid, uintptr_t addr) {
+    std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
+    auto it = g_csframes.find(tid);
+    if (it == g_csframes.end()) return;
+    for (auto &frame : it->second)
+        frame.writes.insert(addr);
+}
+
+// Return the lock addresses of all currently held locks for this thread.
+// This is the set L passed to the read / write procedures
+static std::vector<void*> get_held_locks(int tid) {
+    std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
+    std::vector<void*> held;
+    auto it = g_csframes.find(tid);
+    if (it == g_csframes.end()) return held;
+    for (auto &frame : it->second)
+        held.push_back(frame.lock_addr);
+    return held;
+}
+
+// =============================================================================
+// 3.  STATE STRUCTURES
+// =============================================================================
 
 
-// ==========================================
-// GLOBAL STATE
-// ==========================================
+struct ThreadState {
+    int    tid;
+    int    N;
+    VClock H;
+    VClock P;
 
-// Thread Registry
-std::mutex print_mtx;
-// static std::mutex thread_map_lock;
-// static std::map<pthread_t, ThreadState*> threads;
-// static int next_tid = 1;
-// static int race_count = 0;
+    mutable std::recursive_mutex mtx;
 
-// // Shadow Memory (Maps Address -> VarState)
-// static std::mutex shadow_lock;
-// static std::unordered_map<void*, VarState*> shadow_vars;
+    explicit ThreadState(int id) : tid(id), N(1) {
+        vc_ensure(H, id);
+        H[id] = 1;
+    }
 
-// // Lock Registry (Maps Mutex Address -> LockState)
-// static std::mutex lock_registry_lock;
-// static std::unordered_map<void*, LockState*> shadow_locks;
+    VClock Ct() const { return make_Ct(P, tid, N); }
+};
 
-// ==========================================
-// INFRASTRUCTURE HELPERS
-// ==========================================
+// ── Per-lock ──────────────────────────────────────────────────────────────────
+struct LockState {
+    VClock H_lock;
+    VClock P_lock;
 
-// ThreadState* get_current_thread() {
-//     pthread_t self = pthread_self();    
-//     std::lock_guard<std::mutex> lock(thread_map_lock);
-//     if (threads.find(self) == threads.end()) {
-//         threads[self] = new ThreadState(next_tid++);
-//     }
-//     return threads[self];
-// }
+    // FIFO queues indexed by the destination thread.
+    // Acq_ℓ(t): C_t snapshots from acq events by threads t'≠t
+    // Rel_ℓ(t): H_t snapshots from rel events by threads t'≠t
+    std::unordered_map<int, std::deque<VClock>> Acq;
+    std::unordered_map<int, std::deque<VClock>> Rel;
 
-// VarState* get_var_state(void* addr) {
-//     std::lock_guard<std::mutex> lock(shadow_lock);
-//     if (shadow_vars.find(addr) == shadow_vars.end()) {
-//         shadow_vars[addr] = new VarState();
-//     }
-//     return shadow_vars[addr];
-// }
+    // Lr[x] and Lw[x] for this lock
+    std::unordered_map<uintptr_t, VClock> Lr;
+    std::unordered_map<uintptr_t, VClock> Lw;
 
-// LockState* get_lock_state(void* mutex_addr) {
-//     std::lock_guard<std::mutex> lock(lock_registry_lock);
-//     if (shadow_locks.find(mutex_addr) == shadow_locks.end()) {
-//         shadow_locks[mutex_addr] = new LockState();
-//     }
-//     return shadow_locks[mutex_addr];
-// }
+    mutable std::recursive_mutex mtx;
+};
 
-// void report_race(const char* type, void* addr, int tid1, int tid2, char* inst_str) {
-//     printf("[WCP RUNTIME] | TYPE: %s | ADDR: %p | THREADS: %d-%d \n", type, addr, tid1, tid2);
-//     printf("    IR INST: %s\n", inst_str);
-// }
+// ── Per-variable ──────────────────────────────────────────────────────────────
+struct VarState {
+    VClock Wx;
+    VClock Rx;
+    mutable std::recursive_mutex mtx;
+};
 
-
-
-// ------------------------------------------------------------
-// Thread context passed from parent → child
-// ------------------------------------------------------------
+// ── Thread context: passed parent → child through pthread_create ──────────────
 struct ThreadContext {
     void *(*original_routine)(void *);
-    void *original_arg;
-
-    // std::vector<int> parent_vc_snapshot;
+    void  *original_arg;
+    VClock parent_H;
+    VClock parent_P;
 };
+
+// =============================================================================
+// 4.  GLOBAL STATE
+// =============================================================================
+
+static std::atomic<int> next_tid{1};
+static std::atomic<int> race_count{0};
+
+static std::recursive_mutex              g_thread_map_mtx;
+static std::map<pthread_t, ThreadState*> g_thread_map;
+
+static std::recursive_mutex                  g_lock_map_mtx;
+static std::unordered_map<void*, LockState*> g_lock_map;
+
+static std::recursive_mutex                 g_var_map_mtx;
+static std::unordered_map<void*, VarState*> g_var_map;
+
+static thread_local ThreadState *tl_thread_state = nullptr;
+
+// =============================================================================
+// 5.  REGISTRY HELPERS
+// =============================================================================
+
+static ThreadState *get_current_thread() {
+    if (tl_thread_state) return tl_thread_state;
+    pthread_t self = pthread_self();
+    std::lock_guard<std::recursive_mutex> lk(g_thread_map_mtx);
+    auto it = g_thread_map.find(self);
+    if (it == g_thread_map.end()) {
+        int id   = next_tid.fetch_add(1, std::memory_order_relaxed);
+        auto *ts = new ThreadState(id);
+        g_thread_map[self] = ts;
+        tl_thread_state    = ts;
+    } else {
+        tl_thread_state = it->second;
+    }
+    return tl_thread_state;
+}
+
+static LockState *get_lock_state(void *addr) {
+    std::lock_guard<std::recursive_mutex> lk(g_lock_map_mtx);
+    auto &p = g_lock_map[addr];
+    if (!p) p = new LockState();
+    return p;
+}
+
+static VarState *get_var_state(void *addr) {
+    std::lock_guard<std::recursive_mutex> lk(g_var_map_mtx);
+    auto &p = g_var_map[addr];
+    if (!p) p = new VarState();
+    return p;
+}
+
+
+static std::vector<int> other_tids(int exclude_tid) {
+    std::vector<int> result;
+    std::lock_guard<std::recursive_mutex> lk(g_thread_map_mtx);
+    for (auto &kv : g_thread_map)
+        if (kv.second->tid != exclude_tid)
+            result.push_back(kv.second->tid);
+    return result;
+}
+
+// =============================================================================
+// 6.  RACE REPORTING
+// =============================================================================
+
+static void report_race(const char *type, void *addr,
+                        int tid1, int tid2, int line_no) {
+    race_count.fetch_add(1, std::memory_order_relaxed);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    printf("[WCP LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d "
+           "| LINE: %d | TS_NS: %llu\n",
+           type, addr, tid1, tid2, line_no,
+           (unsigned long long)ns);
+}
+
+// =============================================================================
+// 7.  Acquire
+// =============================================================================
+//
+//  1: H_t := H_t ⊔ H_ℓ
+//  2: P_t := P_t ⊔ P_ℓ
+//  3: ∀ t'≠t: Acq_ℓ(t').Enqueue(C_t)
+
+static void do_acquire(ThreadState *t, LockState *ls) {
+    std::lock_guard<std::recursive_mutex> lk_t(t->mtx);
+    std::lock_guard<std::recursive_mutex> lk_l(ls->mtx);
+
+    vc_join(t->H, ls->H_lock);
+    vc_join(t->P, ls->P_lock);
+
+    VClock Ct = t->Ct();
+    for (int tp : other_tids(t->tid))
+        ls->Acq[tp].push_back(Ct);
+}
+
+// =============================================================================
+// 8.  Release
+// =============================================================================
+//
+//  1: while Acq_ℓ(t).front() ⊑ C_t:
+//           Acq_ℓ(t).Dequeue()
+//           P_t := P_t ⊔ Rel_ℓ(t).Dequeue()
+//  2:   ∀ x∈R: Lr[ℓ][x] ⊔= H_t
+//  3:   ∀ x∈W: Lw[ℓ][x] ⊔= H_t
+//  4:   H_ℓ := H_t;  P_ℓ := P_t
+//  5:   ∀ t'≠t: Rel_ℓ(t').Enqueue(H_t)
+
+static void do_release(ThreadState *t, LockState *ls, void *lock_addr) {
+    // Harvest CS variable sets BEFORE acquiring the main locks to avoid
+    // lock-ordering issues with g_csframe_mtx.
+    std::unordered_set<uintptr_t> cs_R, cs_W;
+    csframe_pop(t->tid, lock_addr, cs_R, cs_W);
+
+    std::lock_guard<std::recursive_mutex> lk_t(t->mtx);
+    std::lock_guard<std::recursive_mutex> lk_l(ls->mtx);
+
+    VClock Ct = t->Ct();
+
+    auto &acq_q = ls->Acq[t->tid];
+    auto &rel_q = ls->Rel[t->tid];
+    while (!acq_q.empty() && !rel_q.empty() &&
+           vc_leq(acq_q.front(), Ct)) {
+        acq_q.pop_front();
+        vc_join(t->P, rel_q.front());  // line 6
+        rel_q.pop_front();
+    }
+
+    for (uintptr_t xaddr : cs_R)
+        vc_join(ls->Lr[xaddr], t->H);
+
+    for (uintptr_t xaddr : cs_W)
+        vc_join(ls->Lw[xaddr], t->H);
+
+    ls->H_lock = t->H;
+    ls->P_lock = t->P;
+
+    for (int tp : other_tids(t->tid))
+        ls->Rel[tp].push_back(t->H);
+
+    t->N++;
+    vc_ensure(t->H, t->tid);
+    t->H[t->tid] = t->N;
+}
+
+// =============================================================================
+// 9.  EXPORTED RUNTIME FUNCTIONS
+// =============================================================================
 
 extern "C" {
 
-    void* __wcp_prepare_context(void* routine, void* arg) {
-        
-        ThreadContext* ctx = new ThreadContext();
-        ctx->original_routine = (void*(*)(void*))routine;
-        ctx->original_arg = arg;
+void *__wcp_prepare_context(void *routine, void *arg) {
+    auto *ctx             = new ThreadContext();
+    ctx->original_routine = reinterpret_cast<void*(*)(void*)>(routine);
+    ctx->original_arg     = arg;
 
-        // CAPTURE PARENT'S CURRENT CLOCK
-        // ThreadState* parent = get_current_thread();
-        
-        // std::lock_guard<std::mutex> lock(parent->mtx);
-        // ctx->parent_vc_snapshot = parent->C;
-        return ctx;
+    ThreadState *parent = get_current_thread();
+    {
+        std::lock_guard<std::recursive_mutex> lk(parent->mtx);
+
+        // Fork event: advance parent's local clock.
+        parent->N++;
+        vc_ensure(parent->H, parent->tid);
+        parent->H[parent->tid] = parent->N;
+
+        ctx->parent_H = parent->H;
+        ctx->parent_P = parent->P;
     }
-
-
-    void* thread_wrapper(void* raw_args) {
-        ThreadContext* ctx = (ThreadContext*)raw_args;
-
-        // 1. Get Child Thread State
-        // ThreadState* child = get_current_thread();
-
-        // 2. INHERIT HISTORY (WCP Logic)
-        // {
-        //     std::lock_guard<std::mutex> lock(child->mtx);
-            
-        //     // Step A: Copy parent's snapshot into child's VC
-        //     // Child.C = Parent.Snapshot
-        //     child->C = ctx->parent_vc_snapshot;
-            
-        //     // Step B: Ensure vector is large enough for Child's TID
-        //     if (child->tid >= child->C.size()) {
-        //         child->C.resize(child->tid + 1, 0);
-        //     }
-            
-        //     // Step C: Start Child's own timeline
-        //     // Child.C[Child.tid] = 1 (or increment if we inherited something)
-        //     child->C[child->tid] = 1;
-        // }
-
-
-        // 3. Run User Code
-        void* result = ctx->original_routine(ctx->original_arg);
-
-        // 4. Cleanup
-        delete ctx;
-        return result;
-    }
-
-
-    // ------------------------------------------------------------
-    // THREAD CREATION (parent-side)
-    // ------------------------------------------------------------
-
-    void __wcp_thread_create(uint64_t child_id_raw) {
-        // 1. Get Parent Thread State
-        // ThreadState* parent = get_current_thread();
-
-        // // 2. Increment Parent's Clock
-        // {
-        //     std::lock_guard<std::mutex> lock(parent->mtx);
-            
-        //     // Parent.C[Parent.tid]++
-        //     parent->C[parent->tid]++;
-        // }
-        
-        // printf("[WCP RUNTIME] Thread %d created new thread (Raw ID: %lu)\n", 
-        //        parent->tid, (unsigned long)child_id_raw);
-        printf("[WCP RUNTIME] Thread created new thread (Raw ID: %lu)\n", (unsigned long)child_id_raw);
-    }
-
-    void __wcp_thread_join(uint64_t child_raw_id) {
-        // 1. IDENTIFY PARENT (Current Thread)
-        // The thread calling join() is the parent.
-        // ThreadState* parent = get_current_thread();
-
-        // // 2. IDENTIFY CHILD (From Argument)
-        // ThreadState* child = nullptr;
-        // {
-        //     std::lock_guard<std::mutex> lock(thread_map_lock);
-        //     auto it = threads.find(child_raw_id);
-        //     if (it != threads.end()) {
-        //         child = it->second;
-        //     }
-        // }
-
-        // if (!child) {
-        //     std::cout << "[WCP RUNTIME] WARNING: Joined thread with raw ID " << (unsigned long)child_raw_id 
-        //          << " not found in registry." << std::endl;
-        //     // Child might not have been instrumented or created via our hooks
-        //     return;
-        // }
-
-        // printf("[WCP RUNTIME] Thread %d (Parent) joined with Thread %d (Child)\n", 
-            // parent->tid, child->tid);
-        printf("[WCP RUNTIME] Thread join on %lu\n", 
-            (unsigned long)child_raw_id);
-    }
-
-    // ------------------------------------------------------------
-    // MEMORY EVENTS
-    // ------------------------------------------------------------
-    void __wcp_read(void* addr, char* inst_str) {
-        std::cout<<"[WCP RUNTIME] Read Operation\n";
-    }
-
-    void __wcp_write(void* addr, char* inst_str) {
-        std::cout<<"[WCP RUNTIME] Write Operation\n";
-    }
-
-
-    // ------------------------------------------------------------
-    // LOCK EVENTS
-    // ------------------------------------------------------------
-    void __wcp_lock(void* mutex_addr) {
-        std::cout<<"[WCP RUNTIME] Thread Lock\n";
-    }
-
-    void __wcp_unlock(void* mutex_addr) {
-        std::cout<<"[WCP RUNTIME] Thread Unlock\n";
-    }
-
+    return ctx;
 }
+
+void *thread_wrapper(void *raw_arg) {
+    auto *ctx = reinterpret_cast<ThreadContext*>(raw_arg);
+
+    int    id    = next_tid.fetch_add(1, std::memory_order_relaxed);
+    auto  *child = new ThreadState(id);
+
+    // Fork edge: child inherits parent's HB and WCP-pred clocks.
+    {
+        std::lock_guard<std::recursive_mutex> lk(child->mtx);
+        child->H = ctx->parent_H;
+        child->P = ctx->parent_P;
+        child->N = 1;
+        // Stamp the child's own component: H_child[child_tid] = N_child = 1.
+        vc_ensure(child->H, child->tid);
+        child->H[child->tid] = child->N;
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_thread_map_mtx);
+        g_thread_map[pthread_self()] = child;
+    }
+    tl_thread_state = child;
+
+    void *(*fn)(void*) = ctx->original_routine;
+    void  *fn_arg      = ctx->original_arg;
+    delete ctx;
+
+    return fn(fn_arg);
+}
+
+void __wcp_thread_create(uint64_t /*child_id_raw*/) {
+    // No-op: parent clock already incremented in __wcp_prepare_context.
+}
+
+void __wcp_thread_join(uint64_t child_raw_id) {
+    ThreadState *parent = get_current_thread();
+    ThreadState *child  = nullptr;
+
+    std::map<pthread_t, ThreadState*>::iterator it;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_thread_map_mtx);
+        it = g_thread_map.find((pthread_t)child_raw_id);
+        if (it != g_thread_map.end())
+            child = it->second;
+    }
+
+    if (!child) {
+        fprintf(stderr, "[WCP] WARNING: joined thread %lu not in registry\n",
+                (unsigned long)child_raw_id);
+        return;
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lk_p(parent->mtx);
+        std::lock_guard<std::recursive_mutex> lk_c(child->mtx);
+
+        // Merge child's clocks into parent (join edge).
+        vc_join(parent->H, child->H);
+        vc_join(parent->P, child->P);
+
+        // Keep H_parent[parent_tid] = N_parent.
+        vc_ensure(parent->H, parent->tid);
+        parent->H[parent->tid] = parent->N;
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_thread_map_mtx);
+        g_thread_map.erase(it);
+    }
+    delete child;
+}
+
+void __wcp_lock(void *mutex_addr) {
+    ThreadState *t  = get_current_thread();
+    LockState   *ls = get_lock_state(mutex_addr);
+
+    do_acquire(t, ls);
+
+    // Open a CS frame to begin tracking variable accesses inside this CS.
+    csframe_push(t->tid, mutex_addr);
+}
+
+void __wcp_unlock(void *mutex_addr) {
+    ThreadState *t  = get_current_thread();
+    LockState   *ls = get_lock_state(mutex_addr);
+
+    do_release(t, ls, mutex_addr);
+}
+
+// ── __wcp_read ────────────────────────────────────────────────────────────────
+//
+//   P_t := P_t ⊔ (⊔_{ℓ∈L} Lw[ℓ][x])
+//   if ¬(Wx ⊑ C_t) → W-R race
+//   Rx := Rx ⊔ C_t
+void __wcp_read(void *addr, int line_no) {
+    ThreadState *t  = get_current_thread();
+    VarState    *vs = get_var_state(addr);
+    uintptr_t xaddr = (uintptr_t)addr;
+
+    // Record in all enclosing CS frames (to populate Lr at release, line 7).
+    csframe_record_read(t->tid, xaddr);
+
+    // L = set of locks currently held by t.
+    std::vector<void*> held = get_held_locks(t->tid);
+
+    std::lock_guard<std::recursive_mutex> lk_t(t->mtx);
+    std::lock_guard<std::recursive_mutex> lk_v(vs->mtx);
+
+    // Line 11: P_t := P_t ⊔ (⊔_{ℓ∈L} Lw[ℓ][x])
+    for (void *la : held) {
+        LockState *ls = get_lock_state(la);
+        std::lock_guard<std::recursive_mutex> lk_l(ls->mtx);
+        auto it = ls->Lw.find(xaddr);
+        if (it != ls->Lw.end())
+            vc_join(t->P, it->second);
+    }
+
+    VClock Ct = t->Ct();
+
+    // Race check: ¬(Wx ⊑ C_t)  →  W-R WCP-race
+    if (!vc_leq(vs->Wx, Ct)) {
+        int other = first_violating_tid(vs->Wx, Ct);
+        report_race("W-R", addr, other, t->tid, line_no);
+    }
+
+    // Rx := Rx ⊔ C_t
+    vc_join(vs->Rx, Ct);
+}
+
+// ── __wcp_write ───────────────────────────────────────────────────────────────
+//
+//   P_t := P_t ⊔ (⊔_{ℓ∈L} (Lr[ℓ][x] ⊔ Lw[ℓ][x]))
+//   if ¬(Rx ⊑ C_t)  → R-W race
+//   if ¬(Wx ⊑ C_t)  → W-W race
+//   Wx := Wx ⊔ C_t
+void __wcp_write(void *addr, int line_no) {
+    ThreadState *t  = get_current_thread();
+    VarState    *vs = get_var_state(addr);
+    uintptr_t xaddr = (uintptr_t)addr;
+
+    // Record in all enclosing CS frames (to populate Lw at release, line 8).
+    csframe_record_write(t->tid, xaddr);
+
+    std::vector<void*> held = get_held_locks(t->tid);
+
+    std::lock_guard<std::recursive_mutex> lk_t(t->mtx);
+    std::lock_guard<std::recursive_mutex> lk_v(vs->mtx);
+
+    for (void *la : held) {
+        LockState *ls = get_lock_state(la);
+        std::lock_guard<std::recursive_mutex> lk_l(ls->mtx);
+        auto itr = ls->Lr.find(xaddr);
+        if (itr != ls->Lr.end())
+            vc_join(t->P, itr->second);
+        auto itw = ls->Lw.find(xaddr);
+        if (itw != ls->Lw.end())
+            vc_join(t->P, itw->second);
+    }
+
+    VClock Ct = t->Ct();
+
+    // Race check: ¬(Rx ⊑ C_t)  →  R-W WCP-race
+    if (!vc_leq(vs->Rx, Ct)) {
+        int other = first_violating_tid(vs->Rx, Ct);
+        report_race("R-W", addr, other, t->tid, line_no);
+    }
+
+    // Race check: ¬(Wx ⊑ C_t)  →  W-W WCP-race
+    if (!vc_leq(vs->Wx, Ct)) {
+        int other = first_violating_tid(vs->Wx, Ct);
+        report_race("W-W", addr, other, t->tid, line_no);
+    }
+
+    // Wx := Wx ⊔ C_t
+    vc_join(vs->Wx, Ct);
+}
+
+} // extern "C"
