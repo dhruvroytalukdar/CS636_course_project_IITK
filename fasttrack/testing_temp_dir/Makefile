@@ -14,16 +14,18 @@ PASS_FLAGS = -fPIC -shared -O3
 # Source files for your test program and runtime
 # TEST_SRC = ./src/test.cpp
 
-TEST_SRC = ./src/sharing_patterns.cpp
-RUNTIME_SRC = runtime2.cpp
+TEST_SRC = ./src/benchmark_load.cpp
+# TEST_SRC = ./src/sharing_patterns.cpp
+RUNTIME_SRC = runtime.cpp
 RUNTIME_OBJ = runtime.o
-BASE_PASS = base_pass2.cpp
-TARGET_PASS = target_pass2.cpp
+BASE_PASS = base_pass.cpp
+# TARGET_PASS = target_pass.cpp
+TARGET_PASS = escape_pass_ver2.cpp 
 
 # The pass pipeline names (MUST match the names registered in llvmGetPassPluginInfo)
 # Update these if your PassPluginInfo registers different string names!
-# BASE_PASS_CMD = base-pass
-BASE_PASS_CMD = fasttrack-pass
+BASE_PASS_CMD = base-pass
+# BASE_PASS_CMD = fasttrack-pass
 TARGET_PASS_CMD = shared-ptr-analysis
 
 

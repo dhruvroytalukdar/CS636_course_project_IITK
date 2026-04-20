@@ -45,7 +45,7 @@ static void test5_escape_via_vector() {
 int** global_ptr;
 static void *worker_heap(void *) {
     pthread_mutex_lock(&g_vec_mutex);
-    int *p = (global_ptr == null) ? nullptr : global_ptr[4];
+    int *p = (global_ptr == nullptr) ? nullptr : global_ptr[4];
     // int* p = (gl == nullptr ? nullptr : gl);
     pthread_mutex_unlock(&g_vec_mutex);
     if (p) *p = 55;         /* TEST_RACE_5: write (no lock on the int itself) */
@@ -78,6 +78,6 @@ static void heap_test(){
 }
 int main(){
     heap_test();
-    // test5_escape_via_vector();
+    test5_escape_via_vector();
     return 0;
 }
