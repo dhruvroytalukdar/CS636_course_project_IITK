@@ -178,7 +178,7 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     if (Load->getType()->isPointerTy()) {
                         // If P is shared, the loaded pointer SSA value becomes shared.
                         DependencyGraph[P].insert(Load);
-                        // DependencyGraph[Load].insert(P);
+                        DependencyGraph[Load].insert(P);
                     }
                 }
                 // 3. GET ELEMENT PTR (Struct/Array field access)
@@ -243,8 +243,8 @@ void runInterproceduralEscapeAnalysis(Module &M) {
                     Function *Callee = Call->getCalledFunction();
                     bool isBlackBox = (Callee == nullptr) || Callee->isDeclaration();
                     bool isSafe = Callee && isKnownSafeLibCall(Callee->getName());
-if (Callee && Callee->getName().contains("setter")) {
-    errs() << "\n[DEBUG] Found push_back call!\n";
+if (Callee && Callee->getName().contains("emplace_back")) {
+    errs() << "\n[DEBUG] Found emplace_back call!\n";
     errs() << "        Caller: " << F.getName() << "\n";
     errs() << "        isDeclaration: " << Callee->isDeclaration() << "\n";
     for (unsigned i = 0; i < Call->arg_size(); ++i) {
@@ -1113,23 +1113,23 @@ bool isKnownSafeLibCall(StringRef FuncName) {
            FuncName.starts_with("pthread_");                                              // 
 }    
 void printAnalysisResults() const {
-        errs() << "========== SharedSet ==========\n";
-        for (const Value *V : SharedSet) {
-            errs() << " * ";
-            V->printAsOperand(errs(), false);
-            errs() << "\n";
-        }
+        // errs() << "========== SharedSet ==========\n";
+        // for (const Value *V : SharedSet) {
+        //     errs() << " * ";
+        //     V->printAsOperand(errs(), false);
+        //     errs() << "\n";
+        // }
 
-        errs() << "\n======= Dependency Graph =======\n";
-        for (const auto &Node : DependencyGraph) {
-            Value *A = Node.first;
-            for (Value *B : Node.second) {
-                A->printAsOperand(errs(), false);
-                errs() << " -> ";
-                B->printAsOperand(errs(), false);
-                errs() << "\n";
-            }
-        }
+        // errs() << "\n======= Dependency Graph =======\n";
+        // for (const auto &Node : DependencyGraph) {
+        //     Value *A = Node.first;
+        //     for (Value *B : Node.second) {
+        //         A->printAsOperand(errs(), false);
+        //         errs() << " -> ";
+        //         B->printAsOperand(errs(), false);
+        //         errs() << "\n";
+        //     }
+        // }
         errs() << "================================\n";
         errs() << "\n===== Stats =====\n";
 errs() << "loads = " << num_loads << "\n";
