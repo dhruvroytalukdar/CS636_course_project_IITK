@@ -19,8 +19,10 @@ ESCAPE_PASS_SRC := escape_instrumentation.cpp
 TARGET_DIR     := targets/old_targets_dhruv
 
 RUNTIME_FT     := fasttrack_runtime.cpp
-RUNTIME_SA     := fasttrack_runtime_with_sa_ver4.cpp
+RUNTIME_SA     := fasttrack_runtime_with_sa_ver6.cpp
 TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
+
+SA_TEST_SRC    := sa_correctness_test.cpp
 
 # ──────────────────────────────────────────────────────────────────
 # BUILD DIRECTORY — all generated files live here
@@ -39,19 +41,19 @@ TARGET_LL      := $(BUILD_DIR)/$(basename $(TARGET_SRC)).ll
 
 RUNTIME_FT_OBJ    := $(BUILD_DIR)/runtime_ft.o
 RUNTIME_SA_OBJ    := $(BUILD_DIR)/runtime_sa.o
-RUNTIME_FT_RR_OBJ := $(BUILD_DIR)/runtime_ft_rr.o
-RUNTIME_SA_RR_OBJ := $(BUILD_DIR)/runtime_sa_rr.o
 
 BENCH_TSAN    := $(BUILD_DIR)/bench_tsan
 BENCH_FT      := $(BUILD_DIR)/bench_ft
 BENCH_SA      := $(BUILD_DIR)/bench_sa
-BENCH_FT_RR   := $(BUILD_DIR)/bench_ft_rr
-BENCH_SA_RR   := $(BUILD_DIR)/bench_sa_rr
 
 ESCAPE_IR      := $(BUILD_DIR)/instrumented_escape.ll
 ESCAPE_EXEC    := $(BUILD_DIR)/instrumented_escape
 ESCAPE_EXEC_SA := $(BUILD_DIR)/instrumented_escape_sa
 
+SA_TEST_BC      := $(BUILD_DIR)/sa_test.bc
+SA_TEST_INST_BC := $(BUILD_DIR)/sa_test_inst.bc
+SA_TEST_EXEC    := $(BUILD_DIR)/sa_test_inst
+SA_TEST_BASE    := $(BUILD_DIR)/sa_test_base
 
 # Output logs also inside build/
 OUT_FT         := $(BUILD_DIR)/out_ft.txt
@@ -125,13 +127,6 @@ $(RUNTIME_SA_OBJ): $(RUNTIME_SA) | $(BUILD_DIR)
 	@echo "[4b] Compiling SA+FT runtime..."
 	$(CXX) -O0 -g -c $(RUNTIME_SA) -o $@
 
-$(RUNTIME_FT_RR_OBJ): $(RUNTIME_FT) | $(BUILD_DIR)
-	@echo "[4c] Compiling plain FT runtime (record/replay)..."
-	$(CXX) -O0 -g -DFT_RECORD_REPLAY -c $(RUNTIME_FT) -o $@
-
-$(RUNTIME_SA_RR_OBJ): $(RUNTIME_SA) | $(BUILD_DIR)
-	@echo "[4d] Compiling SA+FT runtime (record/replay)..."
-	$(CXX) -O0 -g -DFT_RECORD_REPLAY -c $(RUNTIME_SA) -o $@
 
 # ──────────────────────────────────────────────────────────────────
 # [5a-d] LINK BENCHMARKS
@@ -144,13 +139,6 @@ $(BENCH_SA): $(TARGET_INST_BC) $(RUNTIME_SA_OBJ)
 	@echo "[5b] Linking bench_sa..."
 	$(CXX) $^ -o $@ -lpthread
 
-$(BENCH_FT_RR): $(TARGET_INST_BC) $(RUNTIME_FT_RR_OBJ)
-	@echo "[5c] Linking bench_ft_rr (record/replay)..."
-	$(CXX) $^ -o $@ -lpthread
-
-$(BENCH_SA_RR): $(TARGET_INST_BC) $(RUNTIME_SA_RR_OBJ)
-	@echo "[5d] Linking bench_sa_rr (record/replay)..."
-	$(CXX) $^ -o $@ -lpthread
 
 # ──────────────────────────────────────────────────────────────────
 # [6] ESCAPE ANALYSIS PASS + INSTRUMENTED BINARIES
@@ -172,6 +160,35 @@ $(ESCAPE_EXEC_SA): $(ESCAPE_IR) $(RUNTIME_SA_OBJ)
 	$(CXX) $^ -o $@ -lpthread
 
 instrument_escape: $(ESCAPE_EXEC) $(ESCAPE_EXEC_SA)
+
+$(SA_TEST_BASE): $(SA_TEST_SRC) | $(BUILD_DIR)
+	@echo "[9a] Compiling uninstrumented SA correctness baseline..."
+	$(CXX) -O1 -g -std=c++17 $(SA_TEST_SRC) -o $@ -lpthread
+
+$(SA_TEST_BC): $(SA_TEST_SRC) | $(BUILD_DIR)
+	@echo "[9b] Compiling SA correctness test to bitcode..."
+	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin \
+	       -fno-omit-frame-pointer -g -std=c++17 \
+	       -c $(SA_TEST_SRC) -o $@
+
+$(SA_TEST_INST_BC): $(SA_TEST_BC) $(PLUGIN)
+	@echo "[9c] Instrumenting SA correctness test with FastTrack pass..."
+	$(OPT) -load-pass-plugin=./$(PLUGIN) \
+	       -passes="default<O0>,$(PASS_NAME)" \
+	       $< -o $@
+
+$(SA_TEST_EXEC): $(SA_TEST_INST_BC) $(RUNTIME_SA_OBJ)
+	@echo "[9d] Linking SA correctness test with SA+FT runtime..."
+	$(CXX) $^ -o $@ -lpthread
+
+sa_test: $(SA_TEST_EXEC) $(SA_TEST_BASE)
+	@echo "SA correctness test binaries successfully built in $(BUILD_DIR)/"
+
+run_sa_test: $(SA_TEST_EXEC)
+	@echo ""
+	@echo "====== Running SA Correctness Test ======"
+	chmod +x $(SA_TEST_EXEC)
+	$(SA_TEST_EXEC)
 
 # ──────────────────────────────────────────────────────────────────
 # RUN — execute all four variants and compare
@@ -273,6 +290,10 @@ help:
 	@echo "  build/instrumented_escape    Escape + plain FT binary"
 	@echo "  build/instrumented_escape_sa Escape + SA+FT binary"
 	@echo ""
+	@echo "SA Benchmark Targets:"
+	@echo "  make sa_test          Build the new SA correctness benchmark"
+	@echo "  make run_sa_test      Execute the SA correctness benchmark"
+	@echo ""
 	@echo "Output logs (all in build/):"
 	@echo "  out_ft.txt            Plain FT run log"
 	@echo "  out_sa.txt            SA+FT run log"
@@ -289,4 +310,4 @@ clean:
 
 .PHONY: all run debug clean help \
         bench_tsan target_ir compare \
-        instrument_escape
+        instrument_escape sa_test run_sa_test
