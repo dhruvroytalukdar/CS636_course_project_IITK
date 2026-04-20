@@ -250,13 +250,13 @@ private:
                 if (Value *B = S.baseOf(Cast->getOperand(0)))
                     S.Aliases[Cast] = B;
             }
-            //else if (isa<PtrToIntInst>(Cast)) {
-            //     // pointer =  integer: the pointer bits are now in an integer register.
-            //     // We cannot track integers through the analysis, so conservatively
-            //     // escape the source allocation immediately.
-            //     if (Value *B = S.baseOf(Cast->getOperand(0)))
-            //         escapeBase(B, S);
-            // }
+            else if (isa<PtrToIntInst>(Cast)) {
+                 // pointer =  integer: the pointer bits are now in an integer register.
+                 // We cannot track integers through the analysis, so conservatively
+                 // escape the source allocation immediately.
+                 if (Value *B = S.baseOf(Cast->getOperand(0)))
+                     escapeBase(B, S);
+             }
         }
 
         // else if (auto *Cast = dyn_cast<CastInst>(&I)) {
