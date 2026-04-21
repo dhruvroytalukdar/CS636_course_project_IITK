@@ -22,6 +22,12 @@ using namespace llvm;
 //1 wcp
 
 
+
+//llvm manages inter procedural using call graph 
+//and intra procedural using CFG,(basic blocks)
+// The hardest conceptual leap to make here is this: There are no edges across functions.
+// This new analysis is strictly Intra-Procedural. It treats every single function as an isolated universe
+// . It does not track data across function boundaries at all.
 //
 // We track which heap/stack allocations are provably confined to a single
 // thread ("thread-local"). Loads and stores to thread-local memory are safe
@@ -42,6 +48,8 @@ using namespace llvm;
 // This handles unescaped object graphs (linked lists, etc.) that naive
 // CaptureTracking conservatively over-escapes.
 //===----------------------------------------------------------------------===//
+
+
 
 namespace {
 
@@ -253,7 +261,7 @@ private:
             else if (isa<PtrToIntInst>(Cast)) {
                  // pointer =  integer: the pointer bits are now in an integer register.
                  // We cannot track integers through the analysis, so conservatively
-                 // escape the source allocation immediately.
+                 // escape the source allocation immediately. 
                  if (Value *B = S.baseOf(Cast->getOperand(0)))
                      escapeBase(B, S);
              }
@@ -268,6 +276,8 @@ private:
         // }
         else if (auto *RI = dyn_cast<ReturnInst>(&I)) {
             // Returning a tracked pointer is conservative thread-escape.
+            // This is because the analysis in intra procedural. we have to be conservative when
+            // handling outgoing information, since we cant track them. 
             if (Value *Ret = RI->getReturnValue())
                 if (Ret->getType()->isPointerTy())
                     if (Value *B = S.baseOf(Ret))
@@ -276,31 +286,48 @@ private:
     }
 
     void handleCall(CallInst *CI, BlockState &S) {
+        //THREE types of functions. 
+        //1. indirect calls. - escape all arguments
+        //2. pthread calls.
+        //3. malloc calls - create allocation
+
+
+
         Function *Callee = CI->getCalledFunction();
         if (!Callee || !Callee->hasName()) {
             // Indirect call — escape all pointer args that we track.
+            // indirect calls are black box, should also add a isDeclaration flag check but it is handled later
+            // anyways.
             escapePointerArgs(CI, S);
             return;
         }
 
         StringRef Name = Callee->getName();
 
-        // ---- malloc-family: new thread-local heap allocation ----
+        //malloc-family: new thread-local heap allocation 
         static const StringRef MallocNames[] = {
             "malloc", "calloc", "realloc", "valloc",
             "_Znwm", "_Znam", "_Znwj", "_Znaj"
         };
         for (StringRef MN : MallocNames) {
             if (Name == MN) {
+            // in C++, pointers to a derived class are automatically type-cast
+            // (implicitly converted) to pointers of an accessible base class.
                 AllocInfo Info; Info.Base = CI; Info.Escaped = false;
+                // use of move semantics instead of copying. 
+                // in short std::move is just a cast. It doesn't actually move any data.
+                // It simply tells the compiler: "Treat this lvalue (Info) as if it were a 
+                // temporary rvalue." This "tricks" the compiler into choosing the Move Constructor
+                // instead of the Copy Constructor.
+                // READ MORE LATER.------------------------------------------------------
                 S.Allocs[CI] = std::move(Info);
                 return;
             }
         }
 
-        // ---- pthread_create(tid, attr, start_fn, arg) ----
-        // The `arg` (operand 3) is handed to the new thread — it escapes.
-        // We also propagate transitively: everything reachable from `arg`
+        //pthread_create(tid, attr, start_fn, arg)
+        // The arg (operand 3) is handed to the new thread — it escapes.
+        // We also propagate transitively: everything reachable from arg
         // in the points-to graph must also be marked escaped.
         if (Name == "pthread_create") {
             if (CI->arg_size() >= 4) {
@@ -314,15 +341,16 @@ private:
             return;
         }
 
-        // ---- pthread_join / mutex ops: no new pointer escapes ----
         if (Name == "pthread_join"         ||
             Name == "pthread_mutex_lock"   ||
             Name == "pthread_mutex_unlock" ||
             Name == "pthread_mutex_trylock") {
             return;
         }
+        
 
-        // ---- Unknown call: conservatively escape all non-nocapture ptr args ----
+        //handle black boxes
+        //Unknown call: conservatively escape all non-nocapture ptr args
         escapePointerArgs(CI, S);
     }
 
@@ -330,34 +358,38 @@ private:
         Value *Val  = SI->getValueOperand();
         Value *Dest = SI->getPointerOperand();
 
-        if (!Val->getType()->isPointerTy()) return; // only care about ptr stores
+        if (!Val->getType()->isPointerTy()) return; // only care about ptr stores , now some 
+                                                    // clever one can first cast the pointer 
+                                                    // into a int and then store it and later
+                                                    // cast it back to a pointer, this is obviosuly an escape
+                                                    // but this case is handled by PtrToIntInst case
 
         Value *DestBase = S.baseOf(Dest);
         Value *ValBase  = S.baseOf(Val);
 
-        if (!ValBase) return; // Val not a tracked allocation → nothing to do
+        if (!ValBase) return; // Val not a tracked allocation ->  nothing to do
 
         if (!DestBase) {
-            // Storing tracked ptr into opaque/global memory → escapes.
+            // Storing tracked ptr into opaque/global memory ->  escapes.
             escapeBase(ValBase, S);
             return;
         }
 
         AllocInfo *DestInfo = S.infoFor(Dest);
         if (!DestInfo || DestInfo->Escaped) {
-            // Destination is thread-escaped → the stored pointer escapes too.
+            // Destination is thread-escaped -> the stored pointer escapes too.
             escapeBase(ValBase, S);
             return;
         }
 
-        // Destination is thread-local → record a points-to edge.
+        // Destination is thread-local -> record a points-to edge.
         // KEY: this is the "unescaped object graph" handling from Falcon.
         // We do NOT escape ValBase here; we only do so if DestBase later escapes.
         std::optional<int64_t> Off = constantGEPOffset(Dest, DestBase);
         if (Off) {
             S.Allocs[DestBase].PointsTo[*Off].insert(Val);
         } else {
-            // Unknown offset → can't track precisely → conservatively escape.
+            // Unknown offset -> can't track precisely -> conservatively escape.
             escapeBase(ValBase, S);
         }
     }
@@ -388,6 +420,7 @@ private:
 
     // Escape `Base` (and everything transitively reachable from it via
     // the points-to graph).  Guards against cycles with the Escaped flag.
+    // this is the heart of escape propogation. remember how pointsto graphy was created.
     void escapeBase(Value *Base, BlockState &S) {
         auto It = S.Allocs.find(Base);
         if (It == S.Allocs.end()) return;
