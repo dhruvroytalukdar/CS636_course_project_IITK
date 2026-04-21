@@ -154,6 +154,12 @@ std::unordered_map<pthread_t, int>& get_pthread_map() {
     static auto* instance = new std::unordered_map<pthread_t, int>();
     return *instance;
 }
+std::unordered_map<unsigned long, uint8_t>& get_race_summary_map() {
+    static auto* instance = new std::unordered_map<unsigned long, uint8_t>();
+    return *instance;
+}
+
+#define race_summary get_race_summary_map()
 //std::unordered_map<int, thread_state*>& get_threads(){
 //    static std::unordered_map<int, thread_state*> instance;
 //    return instance;
@@ -200,41 +206,120 @@ int get_tid() {
     if(tls_tid != -1)return tls_tid;
     return -1; 
 }
+thread_local thread_state* tls_state = nullptr;
 
 thread_state* get_current_thread_state() {
+    if (tls_state != nullptr) return tls_state;
+    
     int tid = get_tid();
-    return threads[tid]; 
+    if (tid == -1) return nullptr; 
+
+    // Only hit the map (and the lock) the first time
+    thread_map_lock.lock();
+    auto it = threads.find(tid);
+    if (it != threads.end()) {
+        tls_state = it->second;
+    }
+    thread_map_lock.unlock();
+
+    return tls_state;
 }
+// thread_state* get_current_thread_state() {
+//     int tid = get_tid();
+//     return get_current_thread_state(); 
+// }
+// Bit flags for race types
+const uint8_t FLAG_WW = 1 << 0;
+const uint8_t FLAG_RW = 1 << 1;
+const uint8_t FLAG_WR = 1 << 2;
+
+// Map to track all race types that occurred on a specific address
+// std::unordered_map<unsigned long, uint8_t> race_summary;
 std::set<std::string> reported_races;
+std::set<unsigned long> racy_addr;
 void report_race(racetype type, int tid1, int tid2, unsigned long addr) {
     race_vector_lock.lock();
 
+    // 1. Record the race type for this specific address in the summary map
+    if (type == W_W) race_summary[addr] |= FLAG_WW;
+    if (type == R_W) race_summary[addr] |= FLAG_RW;
+    if (type == W_R) race_summary[addr] |= FLAG_WR;
+
+    // 2. Original logic to log the exact race combination once
     int t_min = tid1;
     int t_max = tid2;
-    
+
     if (type == W_W) {
         if (tid1 > tid2) {
             t_min = tid2;
             t_max = tid1;
         }
     }
-    //unique key
+
     char buffer[128];
     const char* type_str = (type == W_W) ? "W-W" : (type == R_W ? "R-W" : "W-R");
-    
+
     snprintf(buffer, sizeof(buffer), "%s:%d:%d:%lx", type_str, t_min, t_max, addr);
     std::string key(buffer);
 
     if (reported_races.find(key) == reported_races.end()) {
         reported_races.insert(key);
-        
         races.push_back({type, tid1, tid2, addr});
-        
+
+        // Print original log message as it happens
         printf("[Race Detected] %s Thread TID1: %d, TID2: %d ADDR: %lx\n", type_str, tid1, tid2, addr);
     }
 
     race_vector_lock.unlock();
 }
+__attribute__((destructor))
+void print_final_race_summary() {
+    if (race_summary.empty()) return;
+
+    printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
+    for (const auto& pair : race_summary) {
+        unsigned long addr = pair.first;
+        uint8_t flags = pair.second;
+
+        printf("Variable ADDR: %lx | Race Types: [ ", addr);
+
+        if (flags & FLAG_WW) printf("W-W ");
+        if (flags & FLAG_RW) printf("R-W ");
+        if (flags & FLAG_WR) printf("W-R ");
+
+        printf("]\n");
+    }
+    printf("==========================================================\n");
+}
+//void report_race(racetype type, int tid1, int tid2, unsigned long addr) {
+//    race_vector_lock.lock();
+
+//    int t_min = tid1;
+//    int t_max = tid2;
+    
+//    if (type == W_W) {
+//        if (tid1 > tid2) {
+//            t_min = tid2;
+//            t_max = tid1;
+//        }
+//    }
+//    //unique key
+//    char buffer[128];
+//    const char* type_str = (type == W_W) ? "W-W" : (type == R_W ? "R-W" : "W-R");
+    
+//    snprintf(buffer, sizeof(buffer), "%s:%d:%d:%lx", type_str, t_min, t_max, addr);
+//    std::string key(buffer);
+
+//    if (reported_races.find(key) == reported_races.end()) {
+//        reported_races.insert(key);
+        
+//        races.push_back({type, tid1, tid2, addr});
+//        racy_addr.insert(addr);    
+//        printf("[Race Detected] %s Thread TID1: %d, TID2: %d ADDR: %lx\n", type_str, tid1, tid2, addr);
+//    }
+
+//    race_vector_lock.unlock();
+//}
 
 extern "C" void __log_load(void* x) {
 //    std::cout << "debug:" << "got in a load at addr: " << x << std::endl;
@@ -243,7 +328,9 @@ extern "C" void __log_load(void* x) {
     int tid = get_tid();
     if (tid == -1) return;
     //first time load , handling ?? local shared variable detect handling ??
-    thread_state* t_state = threads[tid];
+    thread_state* t_state = get_current_thread_state();
+    
+    if(t_state == nullptr)return;
     int current_clk = t_state->C[tid];
     Epoch current_epoch = MAKE_EP(tid, current_clk);
 
@@ -326,7 +413,8 @@ extern "C" void __log_store(void* x){
     int tid = get_tid();
     if (tid == -1) return;
 
-    thread_state* t_state = threads[tid];
+    thread_state* t_state = get_current_thread_state();
+    if(t_state == nullptr)return;
     
     int current_clk = t_state->C[tid];
     Epoch current_epoch = MAKE_EP(tid, current_clk);
@@ -411,7 +499,7 @@ extern "C" void __log_lock(void* x){
     // std::cout << "debug:" << "got in a lock at addr: " << x << std::endl;
     uint64_t addr = (uint64_t)x;
     int tid = get_tid();
-    thread_state* t = threads[tid];
+    thread_state* t = get_current_thread_state();
 
     int shard = get_lock_index(addr);
     
@@ -435,7 +523,7 @@ extern "C" void __log_unlock(void* x){
     // std::cout << "debug:" << "got in a unlock at addr: " << x << std::endl;
     uint64_t addr = (uint64_t)x;
     int tid = get_tid();
-    thread_state* t = threads[tid];
+    thread_state* t = get_current_thread_state();
 
     int shard = get_lock_index(addr);
     //same lock ? issues ??
@@ -530,29 +618,36 @@ extern "C" int pthread_create(pthread_t* thread, const pthread_attr_t* attr,
     static pthread_create_t real_create = (pthread_create_t)dlsym(RTLD_NEXT, "pthread_create");
     return real_create(thread, attr, thread_wrapper, w_arg);
 }
-
 extern "C" int pthread_join(pthread_t thread, void **retval){
-  
     ensure_runtime_init();
     static pthread_join_t real_join = (pthread_join_t)dlsym(RTLD_NEXT, "pthread_join");
     
     int ret = real_join(thread, retval);
 
     int parent_tid = get_tid();
-    
-    thread_map_lock.lock();
+    if (parent_tid == -1) return ret; // Fix: Prevent unregistered thread access
+
+    thread_state* parent = nullptr;
+    thread_state* child = nullptr;
+
+    thread_map_lock.lock(); // Protect all map operations
     
     if(pthread_map.find(thread) == pthread_map.end()){
         thread_map_lock.unlock();
         return ret;
     }
     int child_tid = pthread_map[thread];
+    
+    // Use .find() or .at() to strictly avoid accidental map insertion during reads
+    auto p_it = threads.find(parent_tid);
+    auto c_it = threads.find(child_tid);
+    
+    if (p_it != threads.end()) parent = p_it->second;
+    if (c_it != threads.end()) child = c_it->second;
+    
     thread_map_lock.unlock();
-    
-  //  printf("DEBUG : pthread_join called, parent : %d, child %d\n" , child_tid, parent_tid);
-    
-    thread_state* parent = threads[parent_tid];
-    thread_state* child = threads[child_tid];
+
+    if (!parent || !child) return ret; // Fix: Prevent nullptr dereference
 
     for(int i = 0; i < MAX_THREADS; i++){
          parent->C[i] = std::max(parent->C[i], child->C[i]);
@@ -561,6 +656,36 @@ extern "C" int pthread_join(pthread_t thread, void **retval){
 
     return ret;
 }
+// extern "C" int pthread_join(pthread_t thread, void **retval){
+  
+//     ensure_runtime_init();
+//     static pthread_join_t real_join = (pthread_join_t)dlsym(RTLD_NEXT, "pthread_join");
+    
+//     int ret = real_join(thread, retval);
+
+//     int parent_tid = get_tid();
+    
+//     thread_map_lock.lock();
+    
+//     if(pthread_map.find(thread) == pthread_map.end()){
+//         thread_map_lock.unlock();
+//         return ret;
+//     }
+//     int child_tid = pthread_map[thread];
+//     thread_map_lock.unlock();
+    
+//   //  printf("DEBUG : pthread_join called, parent : %d, child %d\n" , child_tid, parent_tid);
+    
+//     thread_state* parent = threads[parent_tid];
+//     thread_state* child = threads[child_tid];
+
+//     for(int i = 0; i < MAX_THREADS; i++){
+//          parent->C[i] = std::max(parent->C[i], child->C[i]);
+//     }
+//     parent->C[parent_tid]++;
+
+//     return ret;
+// }
 
 // __attribute__((constructor))
 // void init_system(){

@@ -13,14 +13,15 @@ PASS_FLAGS = -fPIC -shared -O3
 
 # Source files for your test program and runtime
 # TEST_SRC = ./src/test.cpp
-
-TEST_SRC = ./src/benchmark_load.cpp
+	
+TEST_SRC = ../targets/old_targets_dhruv/test_efficiency.cpp
+# TEST_SRC = ./src/benchmark_load.cpp
 # TEST_SRC = ./src/sharing_patterns.cpp
 RUNTIME_SRC = runtime.cpp
 RUNTIME_OBJ = runtime.o
 BASE_PASS = base_pass.cpp
-TARGET_PASS = target_pass.cpp
-# TARGET_PASS = escape_pass_ver2.cpp 
+# TARGET_PASS = target_pass.cpp
+TARGET_PASS = escape_pass_ver2.cpp 
 
 # The pass pipeline names (MUST match the names registered in llvmGetPassPluginInfo)
 # Update these if your PassPluginInfo registers different string names!
@@ -74,10 +75,10 @@ test_target.ll: test.ll target_pass.so
 # 5. Link IR with Runtime to create Binaries
 # ==========================================
 base: test_base.ll $(RUNTIME_OBJ)
-	$(CXX) $< $(RUNTIME_OBJ) -o $@ -lpthread
+	$(CXX) -g $< $(RUNTIME_OBJ) -o $@ -lpthread
 
 target: test_target.ll $(RUNTIME_OBJ)
-	$(CXX) $< $(RUNTIME_OBJ) -o $@ -lpthread
+	$(CXX) -g $< $(RUNTIME_OBJ) -o $@ -lpthread
 
 # ==========================================
 # Execution Target
