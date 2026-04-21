@@ -386,8 +386,7 @@ extern "C" {
         int w_clock = get_clock(x->W);
         if (w_clock > t->get_clock_of(w_tid)) {
             report_race("W-R", addr, w_tid, t->tid, line_no);
-            x->R = t->epoch;
-            return;
+            x->W = 0;
         }
 
         // 3. Update Read State
@@ -426,10 +425,6 @@ extern "C" {
         std::lock_guard<std::recursive_mutex> lock(x->mtx);
         std::lock_guard<std::recursive_mutex> lock2(t->mtx);
 
-        // ---------------------------------------------------------
-        // ALGORITHM START
-        // ---------------------------------------------------------
-
         // 1. Same Epoch Check (Fast Path)
         if (x->W == t->epoch) return;
 
@@ -439,8 +434,6 @@ extern "C" {
         int w_clock = get_clock(x->W);
         if (w_clock > t->get_clock_of(w_tid)) {
             report_race("W-W", addr, w_tid, t->tid, line_no);
-            x->W = t->epoch;
-            return;
         }
 
         // 3. Read-Write Race Check

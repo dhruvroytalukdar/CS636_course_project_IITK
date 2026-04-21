@@ -1,117 +1,3 @@
-// fasttrack_runtime_with_sa_ver8.cpp
-//
-// Performance-first SA + FastTrack — FULLY CORRECT EDITION
-//
-// ══════════════════════════════════════════════════════════════════
-// ANALYSIS OF SECOND EXTERNAL REVIEW (2 claims, both correct)
-// ══════════════════════════════════════════════════════════════════
-//
-// ── CLAIM 1: "TOCTOU: blind hot_word store reverts slow-path
-//             transitions" — CORRECT ───────────────────────────────
-//
-//   ver7 ended the fast path with:
-//     e->hot_word.store(hw, memory_order_release)   // __ft_read
-//     e->hot_word.store(pack_hot(t->tid, OWNED_WRITE), release) // __ft_write
-//   where hw was loaded at the top of the function.
-//
-//   Because the fast path holds no lock, a slow-path thread can
-//   legally steal ownership (OWNED_READ/T1 → SHARED/T2) in the
-//   window between the fast-path's initial load and its final store.
-//   The blind store then reverts the state machine back to
-//   OWNED_READ/T1, erasing T2's transition.  Future accesses see
-//   corrupt state → false negatives and false positives.
-//
-//   FIX: Replace the blind store with compare_exchange_weak.
-//   The CAS publishes the release fence only if hot_word still holds
-//   the value we loaded at the top.  If another thread changed it
-//   (ownership stolen), the CAS fails and the fast path falls through
-//   to the slow path.  The slow path then re-reads hot_word under
-//   var_lk and handles whatever state is current.
-//
-//   Performance impact: on the common uncontended path (sole owner,
-//   no concurrent stealer) the CAS succeeds on the first attempt —
-//   it is a single atomic RMW, not a spin loop.  On x86 this is one
-//   LOCK CMPXCHG instruction, which is more expensive than a plain
-//   MOV but is the minimum cost of a correct lock-free publish.  The
-//   zero-RMW promise in the performance contract cannot be kept while
-//   also writing back to a shared word that other threads may modify.
-//
-// ── CLAIM 2: "Reclaim to OWNED_READ zeroes write epoch, causing
-//             false negatives" — CORRECT ──────────────────────────
-//
-//   ver7 zeroed owner_write_epoch when reclaiming to OWNED_READ:
-//     x->owner_write_epoch.store(0, relaxed);
-//
-//   can_reclaim() checks that the reclaimer's VC dominates x->W.
-//   It may return true even when x->W != 0 (a prior write by another
-//   thread happened-before the reclaimer).  If owner_write_epoch is
-//   then zeroed, a future Thread 3 that is concurrent with the
-//   original writer and has no HB relation to the reclaimer will
-//   seed x->W = 0 and miss the write-read race.
-//
-//   Concrete example:
-//     T1 writes X at clock 10. (OWNED_WRITE, owner_write_epoch=T1@10)
-//     T1 unlocks M; T2 locks M.  T2's VC now dominates T1@10.
-//     T2 reads X. can_reclaim returns true. Reclaims to OWNED_READ.
-//     [BUG] owner_write_epoch set to 0. Record of T1's write lost.
-//     T3 (concurrent with T1, no HB relation) reads X.
-//     Slow path seeds x->W = owner_write_epoch = 0.  ft_read_core
-//     sees W==0, skips write-read race check.  Race missed.
-//
-//   FIX: When reclaiming to OWNED_READ, copy the current x->W into
-//   owner_write_epoch instead of zeroing it.  The seeding logic for
-//   OWNED_READ → SHARED already loads both owner_write_epoch (for W)
-//   and owner_read_epoch (for R), so this is all that is needed.
-//   When reclaiming to OWNED_WRITE, owner_write_epoch is always set
-//   to the reclaimer's current epoch (which is the most recent write),
-//   so no change is needed there.
-//
-// ══════════════════════════════════════════════════════════════════
-// INHERITED FROM EARLIER REVIEWS (still correct)
-// ══════════════════════════════════════════════════════════════════
-//
-// ver5 → ver6: Made VarState fields atomic; added self_clock/self_epoch
-//              to ThreadState; upgraded state pointer load to acquire.
-//
-// ver6 → ver7: Fixed release/acquire chain (fast path now publishes
-//              owner epochs via a fence-carrying hot_word store);
-//              replaced single owner_clock with separate
-//              owner_write_epoch and owner_read_epoch; removed dead
-//              x->W/x->R stores from the fast path.
-//
-// ver7 → ver8: Fixed TOCTOU (CAS instead of blind store); fixed
-//              reclaim write-epoch preservation.
-//
-// ══════════════════════════════════════════════════════════════════
-// PERFORMANCE CONTRACT (updated)
-// ══════════════════════════════════════════════════════════════════
-// For a privately-accessed variable (OWNED by the current thread):
-//   • touches exactly ONE cache line  (the ShadowEntry)
-//   • executes ONE CAS on hot_word (succeeds immediately when
-//     uncontended; falls to slow path only when another thread has
-//     concurrently stolen ownership — rare in the private case)
-//   • acquires ZERO mutexes on the uncontended fast path
-//   • is branch-prediction-friendly (CAS succeeds virtually always)
-//
-// SA STATE MACHINE
-// ════════════════
-//  UNACCESSED  → first access → OWNED_READ or OWNED_WRITE
-//  OWNED_*  (owner == current thread)
-//               → Update owner_write_epoch / owner_read_epoch;
-//                 publish via CAS on hot_word (release on success).
-//                 CAS failure → fall to slow path (ownership stolen).
-//  OWNED_*  (owner != current thread)
-//               → Transition to SHARED.  Seed x->W/x->R precisely.
-//  SHARED       → Always call FT core.  Attempt reclaim on no-race.
-//
-// OWNERSHIP RECLAIM
-// ═════════════════
-//  Thread T can reclaim iff T's VC dominates FT's W/R/Rvc.
-//  Reclaim to OWNED_READ: sets owner_write_epoch = current x->W
-//                         (preserves write history for future seeders)
-//                         sets owner_read_epoch  = T's current epoch.
-//  Reclaim to OWNED_WRITE: sets owner_write_epoch = T's current epoch.
-
 #include <bits/stdc++.h>
 #include <pthread.h>
 #include <mutex>
@@ -119,15 +5,19 @@
 #include <time.h>
 
 // ──────────────────────────────────────────────────────────────────
-// 1. CONSTANTS AND EPOCH HELPERS
+// CONSTANTS AND EPOCH HELPERS
 // ──────────────────────────────────────────────────────────────────
 
+// The size of the last lookup table to store variable metadata
 #define SHADOW_SIZE  (1 << 20)
 #define SHADOW_MASK  (SHADOW_SIZE - 1)
 
+// Encapsulates TID+Clock in a single variable
 typedef unsigned long long Epoch;
 
+// Special number to signify READ_SHARED
 const Epoch READ_SHARED = (Epoch)-1;
+// Last 32 bits represents clock bits
 const int   CLOCK_BITS  = 32;
 const Epoch CLOCK_MASK  = 0xFFFFFFFF;
 
@@ -138,7 +28,7 @@ static inline int get_tid  (Epoch e) { return (int)(e >> CLOCK_BITS); }
 static inline int get_clock(Epoch e) { return (int)(e & CLOCK_MASK); }
 
 // ──────────────────────────────────────────────────────────────────
-// 2. SA STATE ENUM
+// SA STATE ENUM
 // ──────────────────────────────────────────────────────────────────
 
 enum class ShareState : uint32_t {
@@ -149,7 +39,8 @@ enum class ShareState : uint32_t {
 };
 
 // ──────────────────────────────────────────────────────────────────
-// 3. THE HOT WORD
+// A single word representing both owner tid and shared state
+// For fast lookup
 //   bits [63:32] = owner_tid  (int32, -1 means no owner)
 //   bits [31: 0] = ShareState (uint32)
 // ──────────────────────────────────────────────────────────────────
@@ -165,36 +56,30 @@ static inline int hot_owner(uint64_t w) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 4. SHADOW TABLE ENTRY  (exactly one cache line)
+// TABLE ENTRY  (exactly one cache line)
 // ──────────────────────────────────────────────────────────────────
 
 struct VarState;
 
+// To take care of false sharing
 struct alignas(64) ShadowEntry {
+    // Info about owner and shared state
     std::atomic<uint64_t>  hot_word { pack_hot(-1, ShareState::UNACCESSED) };
+    // Additional metadata about the variable
     std::atomic<VarState*> state    { nullptr };
+    // Acts as a key of the hashtable based on granularity to obtain metadata for a variable address
     std::atomic<uintptr_t> key      { 0 };
 };
 static_assert(sizeof(ShadowEntry) == 64, "ShadowEntry must be exactly one cache line");
 
 // ──────────────────────────────────────────────────────────────────
-// 5. VarState
-//
-// owner_write_epoch: the owner's epoch at its most recent write.
-//   Written only by __ft_write fast path (relaxed), published via
-//   CAS on hot_word (release on success).  Read by seeding slow path
-//   with acquire after hot_word acquire.
-//
-// owner_read_epoch: the owner's epoch at its most recent read.
-//   Written only by __ft_read fast path, same publish model.
-//
-// W, R, Rvc: FT layer; written only under var_lk by ft_*_core.
+// VarState
 // ──────────────────────────────────────────────────────────────────
 
 struct VarState {
     std::atomic<Epoch> W  { 0 };
     std::atomic<Epoch> R  { 0 };
-    std::vector<Epoch> Rvc;   // only under var_lk
+    std::vector<Epoch> Rvc;
 
     std::atomic<Epoch> owner_write_epoch { 0 };
     std::atomic<Epoch> owner_read_epoch  { 0 };
@@ -203,16 +88,15 @@ struct VarState {
 };
 
 // ──────────────────────────────────────────────────────────────────
-// 6. ThreadState and LockState
+// ThreadState and LockState
 // ──────────────────────────────────────────────────────────────────
 
 struct ThreadState {
     int tid;
-    std::vector<int> C;   // guarded by mtx
-    Epoch epoch;          // guarded by mtx
+    std::vector<int> C;
+    Epoch epoch;
 
-    // Stable atomic mirrors of C[tid] and epoch; readable from fast path
-    // without holding mtx (written only by the owning thread, under mtx).
+    // Made atomic to read these without holding a lock
     std::atomic<int>   self_clock { 0 };
     std::atomic<Epoch> self_epoch { 0 };
 
@@ -222,6 +106,7 @@ struct ThreadState {
         if (tid >= (int)C.size()) C.resize(tid + 1, 0);
         C[tid] = 1;
         epoch  = make_epoch(tid, 1);
+        // Because the state is getting created and updates can happen lazily
         self_clock.store(1,     std::memory_order_relaxed);
         self_epoch.store(epoch, std::memory_order_relaxed);
     }
@@ -231,8 +116,8 @@ struct ThreadState {
         return C[u];
     }
 
-    // Must be called under mtx whenever C[tid] or epoch changes.
     void sync_self_atomics() {
+        // Usually called while holding a lock
         self_clock.store(C[tid], std::memory_order_relaxed);
         self_epoch.store(epoch,  std::memory_order_relaxed);
     }
@@ -244,7 +129,7 @@ struct LockState {
 };
 
 // ──────────────────────────────────────────────────────────────────
-// 7. GLOBAL STATE
+// GLOBAL STATE
 // ──────────────────────────────────────────────────────────────────
 
 static std::atomic<int> next_tid   {1};
@@ -266,16 +151,20 @@ static std::unordered_map<void*, LockState*>& get_shadow_locks() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 8. INFRASTRUCTURE HELPERS
+// INFRASTRUCTURE HELPERS
 // ──────────────────────────────────────────────────────────────────
 
+// Sets the v[idx] = val, resizing if needed
 static void vec_set_epoch(std::vector<Epoch>& v, int idx, Epoch val) {
     if (idx >= (int)v.size()) v.resize(idx + 1, 0);
     v[idx] = val;
 }
 
+// Returns the thread state of the current thread
 static ThreadState* get_current_thread() {
+    // Return cached state if present
     if (tl_thread_state) return tl_thread_state;
+    // Init threadstate if not cached
     pthread_t self = pthread_self();
     std::lock_guard<std::recursive_mutex> lk(get_thread_map_lock());
     auto& threads = get_threads_map();
@@ -285,10 +174,13 @@ static ThreadState* get_current_thread() {
     return tl_thread_state;
 }
 
+// Given a memory address return the var metadata
 static ShadowEntry* get_shadow_entry(void* addr) {
+    // Generate key, 4 byte granularity to save memory
     uintptr_t key  = ((uintptr_t)addr >> 2) + 1;
+    // To avoid primary clustering in hashing (Knuths Multiplicative Hash)
     size_t    slot = (key * 2654435761ULL) & SHADOW_MASK;
-
+    // Do linear probing if collisons happen
     for (;;) {
         uintptr_t cur = shadow_table[slot].key.load(std::memory_order_acquire);
         if (cur == key) return &shadow_table[slot];
@@ -304,10 +196,17 @@ static ShadowEntry* get_shadow_entry(void* addr) {
 }
 
 static VarState* get_or_alloc_var_state(ShadowEntry* e) {
+    // acquire semantics to make sure the previous release event is complete and we know about it
     VarState* s = e->state.load(std::memory_order_acquire);
     if (s) return s;
     VarState* ns = new VarState();
     VarState* expected = nullptr;
+    // Compare the value of e->state with expected
+    // If the value is same then update it with ns -> True -> return ns
+    //    acquire the data read and then release semantics to publish values to memory
+    // If not same then read that value in expected -> False -> delete ns -> return prev value(expected)
+    //    acquire semantics to sync with previous value
+    // cmp_xchange_strong to ensure there is no spurious failures
     if (!e->state.compare_exchange_strong(expected, ns,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
         delete ns;
@@ -333,17 +232,21 @@ static void report_race(const char* type, void* addr, int tid1, int tid2, int li
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 9. RECLAIM CHECK  (called under var_lk + t->mtx)
+// RECLAIM CHECK
 // ──────────────────────────────────────────────────────────────────
-
+// Called when we are holding a lock on t and x -> we can use memory order relax to load atomic vars
+// from x and t
 static bool can_reclaim(ThreadState* t, VarState* x) {
     Epoch W = x->W.load(std::memory_order_relaxed);
     if (W != 0) {
         int w_tid   = get_tid(W);
         int w_clock = get_clock(W);
-        if (w_tid != t->tid && t->get_clock_of(w_tid) < w_clock)
+        // current thread was not the previous writer and current thread has state knowledge
+        // about previous writer -> Cannot reclaim
+        if (w_tid != t->tid && w_clock > t->get_clock_of(w_tid))
             return false;
     }
+    // The current thread has knowledge about every threads who read from x
     Epoch R = x->R.load(std::memory_order_relaxed);
     if (R == READ_SHARED) {
         for (int i = 0; i < (int)x->Rvc.size(); ++i) {
@@ -362,9 +265,9 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 10. FT CORE  (var_lk + t->mtx held by caller; relaxed is fine)
+// FT CORE
 // ──────────────────────────────────────────────────────────────────
-
+// Called holding a lock over x and t so we can use relaxed mode
 static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     Epoch R = x->R.load(std::memory_order_relaxed);
     if (R == t->epoch) return false;
@@ -372,13 +275,15 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     Epoch W       = x->W.load(std::memory_order_relaxed);
     int   w_tid   = get_tid(W);
     int   w_clock = get_clock(W);
+    bool raced = false;
     if (w_clock > t->get_clock_of(w_tid)) {
         report_race("W-R", addr, w_tid, t->tid, line_no);
+        // Remove the previous write history
         x->W.store(0,        std::memory_order_relaxed);
-        x->R.store(t->epoch, std::memory_order_relaxed);
-        return true;
+        raced = true;
     }
 
+    // Standared fasttrack rules
     if (R == READ_SHARED) {
         vec_set_epoch(x->Rvc, t->tid, t->epoch);
     } else {
@@ -394,7 +299,7 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
             x->R.store(READ_SHARED, std::memory_order_relaxed);
         }
     }
-    return false;
+    return raced;
 }
 
 static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) {
@@ -429,6 +334,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
         }
     }
 
+    // Overwrite the previous information
     x->W.store(t->epoch, std::memory_order_relaxed);
     x->R.store(0,        std::memory_order_relaxed);
     x->Rvc.clear();
@@ -436,7 +342,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 11. SLOW PATH  (shared between __ft_read and __ft_write)
+// SLOW PATH
 //
 // Acquires var_lk + thr_lk, re-reads hot_word, and handles all
 // non-fast-path cases.  Separated into a helper so the fast path
@@ -473,16 +379,12 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
                                   std::memory_order_release);
                 return;
             }
-            // Seed x->W and x->R precisely from the stored owner epochs.
-            // acquire pairs with the previous owner's fast-path relaxed
-            // stores, which were sequenced-before the CAS release that we
-            // just acquired via the hot_word load above.
+            
             if (ss == ShareState::OWNED_WRITE) {
                 x->W.store(x->owner_write_epoch.load(std::memory_order_acquire),
                            std::memory_order_relaxed);
                 x->R.store(0, std::memory_order_relaxed);
             } else {
-                // OWNED_READ: there may also be a prior write epoch to preserve.
                 x->W.store(x->owner_write_epoch.load(std::memory_order_acquire),
                            std::memory_order_relaxed);
                 x->R.store(x->owner_read_epoch.load(std::memory_order_acquire),
@@ -494,16 +396,13 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
             {
                 bool raced = ft_read_core(addr, line_no, x, t);
                 if (!raced && can_reclaim(t, x)) {
-                    // FIX Claim 2: preserve W into owner_write_epoch so that
-                    // future threads seeding from OWNED_READ see the correct
-                    // write history.  Do NOT zero it.
                     x->owner_write_epoch.store(
                         x->W.load(std::memory_order_relaxed),
                         std::memory_order_relaxed);
                     x->owner_read_epoch.store(t->epoch, std::memory_order_relaxed);
                     x->Rvc.clear();
                     e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_READ),
-                                      std::memory_order_release);
+                                        std::memory_order_release);
                 }
             }
             return;
@@ -511,7 +410,6 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
         case ShareState::SHARED: {
             bool raced = ft_read_core(addr, line_no, x, t);
             if (!raced && can_reclaim(t, x)) {
-                // FIX Claim 2: preserve W into owner_write_epoch.
                 x->owner_write_epoch.store(
                     x->W.load(std::memory_order_relaxed),
                     std::memory_order_relaxed);
@@ -554,8 +452,6 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
                                   std::memory_order_release);
                 return;
             }
-            // Seed from both stored epochs — OWNED_READ may have a
-            // non-zero write epoch from a prior ownership cycle.
             x->W.store(x->owner_write_epoch.load(std::memory_order_acquire),
                        std::memory_order_relaxed);
             x->R.store(x->owner_read_epoch.load(std::memory_order_acquire),
@@ -571,7 +467,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
                     x->R.store(0, std::memory_order_relaxed);
                     x->Rvc.clear();
                     e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                                      std::memory_order_release);
+                                        std::memory_order_release);
                 }
             }
             return;
@@ -592,7 +488,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 12. PUBLIC MEMORY ACCESS CALLBACKS
+// PUBLIC MEMORY ACCESS CALLBACKS
 // ──────────────────────────────────────────────────────────────────
 
 extern "C" {
@@ -613,31 +509,34 @@ void __ft_read(void* addr, int line_no) {
     ThreadState* t = get_current_thread();
     ShadowEntry* e = get_shadow_entry(addr);
 
+    // Make sure to load hot_word with acquire semantics to synchronize with the previous release store.
     uint64_t   hw    = e->hot_word.load(std::memory_order_acquire);
     ShareState ss    = hot_state(hw);
     int        owner = hot_owner(hw);
 
     if ((ss == ShareState::OWNED_READ || ss == ShareState::OWNED_WRITE)
         && owner == t->tid) {
-
+        
         VarState* x = e->state.load(std::memory_order_acquire);
+        // update x and read t using relaxed mode
+        // because current thread is the exclusive owner.
         if (x) {
             x->owner_read_epoch.store(
                 t->self_epoch.load(std::memory_order_relaxed),
                 std::memory_order_relaxed);
         }
 
-        // FIX Claim 1: CAS instead of blind store.
-        // desired = same as loaded (OWNED_*/us); fails if stolen.
-        // On success the release fence makes owner_read_epoch visible.
-        uint64_t desired = hw;   // same state, same owner
-        if (e->hot_word.compare_exchange_weak(hw, desired,
+
+        uint64_t desired = hw;
+        // try to update the hotword back with CAS
+        // because after loading at the start of the function another thread might claim ownership
+        // If hw is equal to e->hot_word -> update with desired with release semantics -> return true
+        // else update hw with the value stored in e->hot_word with relaxed semantics -> return false
+        if (e->hot_word.compare_exchange_strong(hw, desired,
                 std::memory_order_release,
                 std::memory_order_relaxed)) {
-            return;   // ← HOT PRIVATE READ PATH — common case
+            return;
         }
-        // CAS failed: ownership was stolen between the load and the CAS.
-        // Fall through to slow path.
     }
 
     ft_slow_read(addr, line_no, e, t);
@@ -650,7 +549,7 @@ void __ft_read(void* addr, int line_no) {
 //   2. If OWNED by us: store owner_write_epoch (relaxed).
 //   3. CAS hot_word: expected = loaded hw,
 //                   desired  = OWNED_WRITE/us (upgrade if needed).
-//      • success → epoch visible to future seeders.  Return.
+//      • success → Return.
 //      • failure → fall to slow path.
 
 void __ft_write(void* addr, int line_no) {
@@ -671,21 +570,19 @@ void __ft_write(void* addr, int line_no) {
                 std::memory_order_relaxed);
         }
 
-        // Desired: always OWNED_WRITE (upgrade from OWNED_READ if needed).
         uint64_t desired = pack_hot(t->tid, ShareState::OWNED_WRITE);
         if (e->hot_word.compare_exchange_weak(hw, desired,
                 std::memory_order_release,
                 std::memory_order_relaxed)) {
             return;   // ← HOT PRIVATE WRITE PATH — common case
         }
-        // CAS failed: fall through to slow path.
     }
 
     ft_slow_write(addr, line_no, e, t);
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 13. THREAD LIFECYCLE CALLBACKS
+// THREAD LIFECYCLE CALLBACKS
 // ──────────────────────────────────────────────────────────────────
 
 struct ThreadContext {
@@ -763,7 +660,7 @@ void __ft_thread_join(uint64_t child_raw_id) {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 14. LOCK CALLBACKS
+// LOCK CALLBACKS
 // ──────────────────────────────────────────────────────────────────
 
 void __ft_lock(void* mutex_addr) {

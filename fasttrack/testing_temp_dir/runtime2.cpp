@@ -1,788 +1,513 @@
-// fasttrack_runtime_with_sa_ver6.cpp
-//
-// Performance-first SA + FastTrack — THREAD SAFE EDITION
-//
-// ══════════════════════════════════════════════════════════════════
-// THREAD SAFETY FIXES vs ver5  (see full analysis below)
-// ══════════════════════════════════════════════════════════════════
-//
-// ver5 had three concurrency bugs in the lock-free fast path:
-//
-// BUG 1 — Plain write-write data race on VarState fields (critical UB)
-// ─────────────────────────────────────────────────────────────────
-//   The fast path wrote x->W, x->R, x->owner_clock (plain non-atomic
-//   struct members) while the slow path of a racing thread held var_lk
-//   and wrote the same fields.  The fact that the owner confirmed
-//   "owner == my tid" from the hot_word snapshot does NOT prevent
-//   another thread from entering the slow path in the gap between that
-//   load and the fast-path stores.  Both threads race on the same
-//   non-atomic memory → undefined behaviour.
-//
-//   FIX: VarState::W, R, and owner_clock are now std::atomic.
-//   The fast path uses relaxed stores (we are the sole writer while
-//   OWNED, so ordering with respect to other threads is provided by
-//   the hot_word release that transitions state out of OWNED, not by
-//   the field stores themselves).  The slow path uses relaxed
-//   loads/stores under var_lk (the mutex provides the necessary
-//   ordering there).  The seeding step (OWNED → SHARED) reads
-//   owner_clock with acquire so it sees the latest value written by
-//   the previous owner on any architecture.
-//
-// BUG 2 — std::vector reallocation race on t->C (critical UB)
-// ─────────────────────────────────────────────────────────────────
-//   The fast path read t->C[t->tid] and t->epoch without holding
-//   t->mtx.  __ft_lock, __ft_unlock, and __ft_thread_join all acquire
-//   t->mtx and may call t->C.resize(), which reallocates the backing
-//   array.  A concurrent read of any element through a stale pointer
-//   is UB, even if the element being read is only written by the
-//   current thread.
-//
-//   FIX: ThreadState now maintains two plain atomics alongside the
-//   vector: self_clock (== C[tid]) and self_epoch (== epoch).  The
-//   fast path reads only these two thread-local atomics — no vector
-//   touch, no lock needed.  All slow-path code that modifies C[tid]
-//   or epoch also updates the two atomics under t->mtx.  Because the
-//   fast path is the ONLY reader/writer of self_clock and self_epoch
-//   that runs without t->mtx, and C[tid] is only written by the
-//   owning thread, a relaxed load in the fast path is sufficient
-//   (the values are effectively thread-local; the atomics just provide
-//   a data-race-free way to publish them for the seeding read in the
-//   slow path of another thread, which uses acquire).
-//
-// BUG 3 — Relaxed pointer load of e->state in fast path (fragile)
-// ─────────────────────────────────────────────────────────────────
-//   e->state was loaded with relaxed, which is safe only because the
-//   hot_word acquire transitively implies visibility of the state
-//   pointer written before the hot_word release.  This hidden
-//   dependency is one refactor away from breaking.
-//
-//   FIX: e->state is now loaded with acquire in the fast path.
-//   On x86 this costs nothing (acquire is free); on ARM it prevents
-//   speculative loads of x->fields from being hoisted before the
-//   pointer read.
-//
-// ══════════════════════════════════════════════════════════════════
-// THE CORE PERFORMANCE CONTRACT (unchanged from ver5)
-// ══════════════════════════════════════════════════════════════════
-// For a privately-accessed variable (OWNED by the current thread):
-//   • touch exactly ONE cache line  (the ShadowEntry)
-//   • execute ZERO atomic RMW operations  (only atomic loads/stores)
-//   • acquire ZERO mutexes
-//   • branch-predict perfectly
-//
-// SA STATE MACHINE
-// ════════════════
-//  UNACCESSED  → first access → OWNED_READ or OWNED_WRITE.
-//  OWNED_*  (owner == current thread)
-//               → Update FT's W/R via atomics (no mutex).
-//  OWNED_*  (owner != current thread)
-//               → Transition to SHARED. Seed FT from stored owner epoch.
-//  SHARED       → Always call FT. Attempt reclaim after non-racing call.
-//
-// OWNERSHIP RECLAIM
-// ═════════════════
-//  Thread T can reclaim iff T's VC dominates FT's W/R/Rvc.
-//  Reclaim fires automatically on next SHARED access after any
-//  HB-establishing event (join, mutex acquire, cond_wait).
-
 #include <bits/stdc++.h>
+#include <cstdio>
 #include <pthread.h>
 #include <mutex>
-#include <atomic>
 #include <time.h>
-
-// ──────────────────────────────────────────────────────────────────
-// 1. CONSTANTS AND EPOCH HELPERS
-// ──────────────────────────────────────────────────────────────────
 
 #define SHADOW_SIZE  (1 << 20)
 #define SHADOW_MASK  (SHADOW_SIZE - 1)
 
+
 typedef unsigned long long Epoch;
 
 const Epoch READ_SHARED = (Epoch)-1;
-const int   CLOCK_BITS  = 32;
-const Epoch CLOCK_MASK  = 0xFFFFFFFF;
+const int CLOCK_BITS = 32;
+const unsigned long long CLOCK_MASK = 0xFFFFFFFF;
 
-static inline Epoch make_epoch(int tid, int clock) {
-    return ((Epoch)tid << CLOCK_BITS) | (Epoch)(clock & (int)CLOCK_MASK);
-}
-static inline int get_tid  (Epoch e) { return (int)(e >> CLOCK_BITS); }
-static inline int get_clock(Epoch e) { return (int)(e & CLOCK_MASK); }
-
-// ──────────────────────────────────────────────────────────────────
-// 2. SA STATE ENUM
-// ──────────────────────────────────────────────────────────────────
-
-enum class ShareState : uint32_t {
-    UNACCESSED  = 0,
-    OWNED_READ  = 1,
-    OWNED_WRITE = 2,
-    SHARED      = 3
-};
-
-// ──────────────────────────────────────────────────────────────────
-// 3. THE HOT WORD — packed into ShadowEntry alongside the VarState*
-//
-// Layout of the 64-bit hot_word:
-//   bits [63:32] = owner_tid  (int32, -1 means no owner)
-//   bits [31: 0] = ShareState (uint32)
-//
-// Both fields are read/written as a single 64-bit atomic, so the
-// fast-path check is a single load + compare.
-// ──────────────────────────────────────────────────────────────────
-
-static inline uint64_t pack_hot(int owner_tid, ShareState ss) {
-    return ((uint64_t)(uint32_t)owner_tid << 32) | (uint32_t)ss;
-}
-static inline ShareState hot_state(uint64_t w) {
-    return (ShareState)(uint32_t)(w & 0xFFFFFFFFULL);
-}
-static inline int hot_owner(uint64_t w) {
-    return (int)(uint32_t)(w >> 32);
+Epoch make_epoch(int tid, int clock) {
+    // Shift TID to the high bits, mask Clock to the low bits, and combine
+    return ((Epoch)tid << CLOCK_BITS) | (clock & CLOCK_MASK);
 }
 
-// ──────────────────────────────────────────────────────────────────
-// 4. SHADOW TABLE ENTRY  (exactly one cache line)
-// ──────────────────────────────────────────────────────────────────
+// Extract Thread ID from the high 32 bits
+int get_tid(Epoch e) {
+    return (int)(e >> CLOCK_BITS);
+}
 
-struct VarState;   // forward declaration
+// Extract Clock Value from the low 32 bits
+int get_clock(Epoch e) {
+    return (int)(e & CLOCK_MASK);
+}
 
-struct alignas(64) ShadowEntry {
-    std::atomic<uint64_t>  hot_word { pack_hot(-1, ShareState::UNACCESSED) };
-    std::atomic<VarState*> state    { nullptr };
-    std::atomic<uintptr_t> key      { 0 };
-};
-static_assert(sizeof(ShadowEntry) == 64, "ShadowEntry must be exactly one cache line");
-
-// ──────────────────────────────────────────────────────────────────
-// 5. VarState  — only touched on slow path
-//
-// FIX (BUG 1): W, R, and owner_clock are now std::atomic.
-//
-//   Why atomic and not just "protected by var_lk"?
-//   Because the fast path reads/writes them WITHOUT holding var_lk.
-//   C++ requires that concurrent accesses to the same object, where
-//   at least one is a write, must either both be atomic or be
-//   protected by the same lock.  Making them atomic satisfies this
-//   at zero extra cost on x86 (naturally aligned 64-bit loads/stores
-//   are already atomic on x86; the std::atomic wrapper just adds the
-//   required memory model contract and prevents UB).
-//
-//   Memory orders used:
-//   • Fast path (owner only, no contention): relaxed stores.
-//     Ordering between the owner's fast-path stores and any future
-//     slow-path read by another thread is provided by the hot_word
-//     release/acquire pair, not by the field stores themselves.
-//   • Seeding read (OWNED→SHARED, inside var_lk): acquire load of
-//     owner_clock so we see the latest value the previous owner wrote
-//     on weakly-ordered architectures (ARM, POWER).
-//   • All other slow-path access: relaxed (var_lk provides ordering).
-// ──────────────────────────────────────────────────────────────────
-
-struct VarState {
-    // FT layer — atomic to allow lock-free fast-path writes by owner.
-    // Slow path accesses these under var_lk with relaxed order.
-    std::atomic<Epoch> W          { 0 };
-    std::atomic<Epoch> R          { 0 };
-    std::vector<Epoch> Rvc;              // only accessed under var_lk
-
-    // Owner's clock at last ownership update.
-    // Written by owner (fast path, relaxed); read by slow path (acquire).
-    std::atomic<int>   owner_clock { 0 };
-
-    std::recursive_mutex mtx;
-};
-
-// ──────────────────────────────────────────────────────────────────
-// 6. ThreadState and LockState
-//
-// FIX (BUG 2): Added self_clock and self_epoch — two atomic scalars
-// that always mirror C[tid] and epoch.  The fast path reads only
-// these two fields; it never touches the C vector.  All code that
-// modifies C[tid] or epoch (slow paths, join, lock, unlock) also
-// updates these atomics.
-//
-// Why separate atomics and not just make epoch atomic?
-//   epoch was already a plain Epoch (uint64); making it atomic is
-//   the right fix.  C[tid] is buried inside a std::vector whose
-//   backing store may be reallocated by concurrent resizes — even
-//   taking the address of C[tid] without holding t->mtx is UB if
-//   another thread could be resizing.  self_clock gives the fast
-//   path a stable, resize-immune location to read from.
-//
-// Memory orders:
-//   self_clock / self_epoch are written relaxed by the owning thread
-//   (they are logically thread-local; no other thread will read them
-//   concurrently with a write — the seeding reader holds var_lk and
-//   loads with acquire, which pairs with the latest relaxed store via
-//   the hot_word release/acquire fence that must precede any seeding).
-//   Loads in the fast path are relaxed for the same reason.
-// ──────────────────────────────────────────────────────────────────
+// ==========================================
+// 2. STATE CLASSES (From Figure 5)
+// ==========================================
 
 struct ThreadState {
     int tid;
-    std::vector<int> C;        // guarded by mtx on all paths
-    Epoch epoch;               // guarded by mtx on all paths
-
-    // FIX: these mirror C[tid] and epoch; readable from fast path
-    // without holding mtx (written only by the owning thread).
-    std::atomic<int>   self_clock { 0 };
-    std::atomic<Epoch> self_epoch { 0 };
-
-    std::recursive_mutex mtx;
+    std::vector<int> C; // Vector Clock: C[u] is clock of thread u
+    Epoch epoch;        
+    std::recursive_mutex mtx; // Per-thread mutex for atomicity
 
     ThreadState(int id) : tid(id) {
-        if (tid >= (int)C.size()) C.resize(tid + 1, 0);
+        if((size_t)tid >= C.size()) {
+            C.resize(tid + 1, 0);
+        }
         C[tid] = 1;
-        epoch  = make_epoch(tid, 1);
-        self_clock.store(1,            std::memory_order_relaxed);
-        self_epoch.store(epoch,        std::memory_order_relaxed);
+        epoch = make_epoch(tid, 1);
     }
-
-    int get_clock_of(int u) const {
-        if (u < 0 || u >= (int)C.size()) return 0;
+    
+    // Helper to get clock of any thread u
+    int get_clock_of(int u) {
+        if (u >= C.size()) return 0;
         return C[u];
     }
+};
 
-    // Called from slow paths that modify C[tid] or epoch, under mtx.
-    void sync_self_atomics() {
-        self_clock.store(C[tid], std::memory_order_relaxed);
-        self_epoch.store(epoch,  std::memory_order_relaxed);
-    }
+struct VarState {
+    std::recursive_mutex mtx; 
+    
+    Epoch W;      
+    Epoch R;      
+    
+    // Use a vector instead of unordered_map for O(1) direct access
+    std::vector<Epoch> Rvc; 
+
+    VarState() : W(0), R(0) {}
 };
 
 struct LockState {
-    std::vector<int> L;
-    std::recursive_mutex mtx;
+    std::vector<int> L; // Lock Vector Clock
+    std::recursive_mutex mtx; // Per-lock mutex for atomicity
 };
 
-// ──────────────────────────────────────────────────────────────────
-// 7. GLOBAL STATE
-// ──────────────────────────────────────────────────────────────────
+struct alignas(64) ShadowEntry {
+    std::atomic<uintptr_t> key   {0};
+    std::atomic<VarState*> state {nullptr};
+};
 
-static std::atomic<int> next_tid   {1};
-static std::atomic<int> race_count {0};
-static ShadowEntry      shadow_table[SHADOW_SIZE];
+
+// ==========================================
+// 3. GLOBAL STATE
+// ==========================================
+
+// Use atomic for thread-safe primitives
+static std::atomic<int> next_tid{1};
+static std::atomic<int> race_count{0};
+
+// Array for fast lookup
+static ShadowEntry shadow_table[SHADOW_SIZE];
+
 static thread_local ThreadState* tl_thread_state = nullptr;
 
-static std::recursive_mutex& get_thread_map_lock() {
-    static std::recursive_mutex m; return m;
+// Thread Registry Accessors
+std::recursive_mutex& get_thread_map_lock() {
+    static std::recursive_mutex mtx;
+    return mtx;
 }
-static std::map<pthread_t, ThreadState*>& get_threads_map() {
-    static auto* m = new std::map<pthread_t, ThreadState*>(); return *m;
-}
-static std::recursive_mutex& get_lock_registry_lock() {
-    static std::recursive_mutex m; return m;
-}
-static std::unordered_map<void*, LockState*>& get_shadow_locks() {
-    static auto* m = new std::unordered_map<void*, LockState*>(); return *m;
+std::map<pthread_t, ThreadState*>& get_threads_map() {
+    static auto* threads = new std::map<pthread_t, ThreadState*>();
+    return *threads;
 }
 
-// ──────────────────────────────────────────────────────────────────
-// 8. INFRASTRUCTURE HELPERS
-// ──────────────────────────────────────────────────────────────────
+std::recursive_mutex& get_shadow_lock() {
+    static std::recursive_mutex mtx;
+    return mtx;
+}
+std::unordered_map<void*, VarState*>& get_shadow_vars() {
+    static auto* shadow_vars = new std::unordered_map<void*, VarState*>();
+    return *shadow_vars;
+}
+
+// Lock Registry Accessors
+std::recursive_mutex& get_lock_registry_lock() {
+    static std::recursive_mutex mtx;
+    return mtx;
+}
+std::unordered_map<void*, LockState*>& get_shadow_locks() {
+    static auto* shadow_locks = new std::unordered_map<void*, LockState*>();
+    return *shadow_locks;
+}
+
+// ==========================================
+// 4. INFRASTRUCTURE HELPERS
+// ==========================================
 
 static void vec_set_epoch(std::vector<Epoch>& v, int idx, Epoch val) {
     if (idx >= (int)v.size()) v.resize(idx + 1, 0);
     v[idx] = val;
 }
 
-static ThreadState* get_current_thread() {
+ThreadState* get_current_thread() {
     if (tl_thread_state) return tl_thread_state;
     pthread_t self = pthread_self();
-    std::lock_guard<std::recursive_mutex> lk(get_thread_map_lock());
+    std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
     auto& threads = get_threads_map();
-    if (!threads.count(self))
+    if (threads.find(self) == threads.end())
         threads[self] = new ThreadState(next_tid++);
     tl_thread_state = threads[self];
     return tl_thread_state;
 }
 
-static ShadowEntry* get_shadow_entry(void* addr) {
-    uintptr_t key  = ((uintptr_t)addr >> 2) + 1;   // +1 ensures key != 0
+VarState* get_var_state(void* addr) {
+    uintptr_t key  = ((uintptr_t)addr >> 2) + 1;
     size_t    slot = (key * 2654435761ULL) & SHADOW_MASK;
 
     for (;;) {
         uintptr_t cur = shadow_table[slot].key.load(std::memory_order_acquire);
-        if (cur == key) return &shadow_table[slot];
+        
+        // Match found
+        if (cur == key) {
+            VarState* s;
+            // Spin-wait just in case we beat the initializing thread to the pointer write
+            while ((s = shadow_table[slot].state.load(std::memory_order_acquire)) == nullptr)
+                ; 
+            return s;
+        }
+        
+        // Empty slot found
         if (cur == 0) {
             uintptr_t expected = 0;
+            // Atomic CAS: Only ONE thread will succeed in changing expected (0) to key
             if (shadow_table[slot].key.compare_exchange_strong(
-                    expected, key, std::memory_order_acq_rel))
-                return &shadow_table[slot];
-            continue;
+                    expected, key, std::memory_order_acq_rel)) {
+                
+                // We won the race! Initialize and publish the pointer.
+                VarState* ns = new VarState();
+                shadow_table[slot].state.store(ns, std::memory_order_release);
+                return ns;
+            }
+            // If CAS failed, another thread stole the slot. Loop and check again.
+            continue; 
         }
+        
+        // Collision, linear probe
         slot = (slot + 1) & SHADOW_MASK;
     }
 }
 
-static VarState* get_or_alloc_var_state(ShadowEntry* e) {
-    VarState* s = e->state.load(std::memory_order_acquire);
-    if (s) return s;
-    VarState* ns = new VarState();
-    VarState* expected = nullptr;
-    if (!e->state.compare_exchange_strong(expected, ns,
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
-        delete ns;
-        return expected;
+LockState* get_lock_state(void* mutex_addr) {
+    std::lock_guard<std::recursive_mutex> lock(get_lock_registry_lock());
+    auto& shadow_locks = get_shadow_locks();
+    if (shadow_locks.find(mutex_addr) == shadow_locks.end()) {
+        shadow_locks[mutex_addr] = new LockState();
     }
-    return ns;
+    return shadow_locks[mutex_addr];
 }
 
-static LockState* get_lock_state(void* addr) {
-    std::lock_guard<std::recursive_mutex> lk(get_lock_registry_lock());
-    auto& sl = get_shadow_locks();
-    if (!sl.count(addr)) sl[addr] = new LockState();
-    return sl[addr];
-}
+// void report_race(const char* type, void* addr, int tid1, int tid2, char* inst_str) {
+//     printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d \n", type, addr, tid1, tid2);
+//     printf("    IR INST: %s\n", inst_str);
+// }
 
-static void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
+
+void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
     race_count.fetch_add(1, std::memory_order_relaxed);
+    
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    
+    // Print the line number cleanly!
     printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
            type, addr, tid1, tid2, line_no, (unsigned long long)ns);
 }
 
-// ──────────────────────────────────────────────────────────────────
-// 9. RECLAIM CHECK  (called under var_lk + t->mtx)
-// ──────────────────────────────────────────────────────────────────
 
-static bool can_reclaim(ThreadState* t, VarState* x) {
-    // Relaxed loads: we are under var_lk which provides the ordering.
-    Epoch W = x->W.load(std::memory_order_relaxed);
-    if (W != 0) {
-        int w_tid   = get_tid(W);
-        int w_clock = get_clock(W);
-        if (w_tid != t->tid && t->get_clock_of(w_tid) < w_clock)
-            return false;
-    }
-    Epoch R = x->R.load(std::memory_order_relaxed);
-    if (R == READ_SHARED) {
-        for (int i = 0; i < (int)x->Rvc.size(); ++i) {
-            if (x->Rvc[i] == 0) continue;
-            int r_clock = get_clock(x->Rvc[i]);
-            if (i != t->tid && t->get_clock_of(i) < r_clock)
-                return false;
-        }
-    } else if (R != 0) {
-        int r_tid   = get_tid(R);
-        int r_clock = get_clock(R);
-        if (r_tid != t->tid && t->get_clock_of(r_tid) < r_clock)
-            return false;
-    }
-    return true;
-}
-
-// ──────────────────────────────────────────────────────────────────
-// 10. FT CORE  (var_lk + t->mtx must be held by caller)
-//
-// All VarState field accesses use relaxed order; the mutex provides
-// the necessary happens-before for correctness.
-// ──────────────────────────────────────────────────────────────────
-
-static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
-    Epoch R = x->R.load(std::memory_order_relaxed);
-    if (R == t->epoch) return false;   // same epoch — nothing to do
-
-    Epoch W       = x->W.load(std::memory_order_relaxed);
-    int   w_tid   = get_tid(W);
-    int   w_clock = get_clock(W);
-    if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-R", addr, w_tid, t->tid, line_no);
-        x->W.store(0,        std::memory_order_relaxed);
-        x->R.store(t->epoch, std::memory_order_relaxed);
-        return true;
-    }
-
-    if (R == READ_SHARED) {
-        vec_set_epoch(x->Rvc, t->tid, t->epoch);
-    } else {
-        int r_tid   = get_tid(R);
-        int r_clock = get_clock(R);
-        if (r_clock <= t->get_clock_of(r_tid)) {
-            x->R.store(t->epoch, std::memory_order_relaxed);
-        } else {
-            Epoch old_R = R;
-            x->Rvc.clear();
-            vec_set_epoch(x->Rvc, r_tid,  old_R);
-            vec_set_epoch(x->Rvc, t->tid, t->epoch);
-            x->R.store(READ_SHARED, std::memory_order_relaxed);
-        }
-    }
-    return false;
-}
-
-static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) {
-    Epoch W = x->W.load(std::memory_order_relaxed);
-    if (W == t->epoch) return false;
-
-    bool raced    = false;
-    int  w_tid    = get_tid(W);
-    int  w_clock  = get_clock(W);
-    if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-W", addr, w_tid, t->tid, line_no);
-        raced = true;
-    }
-
-    Epoch R = x->R.load(std::memory_order_relaxed);
-    if (R != READ_SHARED) {
-        if (R != 0) {
-            int r_tid   = get_tid(R);
-            int r_clock = get_clock(R);
-            if (r_clock > t->get_clock_of(r_tid)) {
-                report_race("R-W", addr, r_tid, t->tid, line_no);
-                raced = true;
-            }
-        }
-    } else {
-        for (int i = 0; i < (int)x->Rvc.size(); ++i) {
-            if (x->Rvc[i] == 0) continue;
-            if (get_clock(x->Rvc[i]) > t->get_clock_of(i)) {
-                report_race("R-W", addr, i, t->tid, line_no);
-                raced = true;
-            }
-        }
-    }
-
-    x->W.store(t->epoch, std::memory_order_relaxed);
-    x->R.store(0,        std::memory_order_relaxed);
-    x->Rvc.clear();
-    return raced;
-}
-
-// ──────────────────────────────────────────────────────────────────
-// 11. PUBLIC MEMORY ACCESS CALLBACKS
-// ──────────────────────────────────────────────────────────────────
-
-extern "C" {
-
-void __ft_read(void* addr, int line_no) {
-    ThreadState* t = get_current_thread();
-
-    // ── FAST PATH ──────────────────────────────────────────────────
-    //
-    // Single acquire load of hot_word + acquire load of state pointer.
-    // Then two relaxed stores into the VarState atomics.
-    // Zero mutexes, zero RMW operations.
-    //
-    // Safety argument:
-    //   • hot_word acquire: sees the latest state/owner transition
-    //     published by the slow path's hot_word release.
-    //   • state acquire (FIX BUG 3): ensures that if we follow the
-    //     pointer, we see all stores to VarState fields that preceded
-    //     the hot_word release in program order.
-    //   • self_clock/self_epoch (FIX BUG 2): stable atomic scalars —
-    //     no vector dereference, immune to concurrent resize.
-    //   • x->R / x->owner_clock relaxed stores (FIX BUG 1): legal
-    //     because we are the sole writer while OWNED.  Another thread
-    //     entering the slow path will acquire var_lk and then re-load
-    //     hot_word; if hot_word still shows OWNED/us, it will read
-    //     owner_clock with acquire, which pairs with our relaxed stores
-    //     transitively via the hot_word release/acquire on any future
-    //     OWNED→SHARED transition.  If hot_word has already changed
-    //     (we raced with a transition), we will have entered the slow
-    //     path ourselves on our next access.
-    // ──────────────────────────────────────────────────────────────
-
-    ShadowEntry* e = get_shadow_entry(addr);
-
-    uint64_t   hw    = e->hot_word.load(std::memory_order_acquire);
-    ShareState ss    = hot_state(hw);
-    int        owner = hot_owner(hw);
-
-    if ((ss == ShareState::OWNED_READ || ss == ShareState::OWNED_WRITE)
-        && owner == t->tid) {
-
-        // FIX BUG 3: acquire, not relaxed, so field loads are ordered.
-        VarState* x = e->state.load(std::memory_order_acquire);
-        if (x) {
-            // FIX BUG 2: read from self_clock / self_epoch, not C[tid].
-            // FIX BUG 1: relaxed atomic stores — no lock needed because
-            //            we are the only writer while OWNED.
-            x->owner_clock.store(t->self_clock.load(std::memory_order_relaxed),
-                                 std::memory_order_relaxed);
-            x->R.store(t->self_epoch.load(std::memory_order_relaxed),
-                       std::memory_order_relaxed);
-        }
-        return;   // ← HOT PRIVATE READ PATH ENDS HERE
-    }
-
-    // ── SLOW PATH ──────────────────────────────────────────────────
-    VarState* x = get_or_alloc_var_state(e);
-    std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
-    std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
-
-    // Re-read hot_word under lock — state may have changed since above.
-    hw    = e->hot_word.load(std::memory_order_acquire);
-    ss    = hot_state(hw);
-    owner = hot_owner(hw);
-
-    switch (ss) {
-        case ShareState::UNACCESSED:
-            x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-            x->W.store(0,        std::memory_order_relaxed);
-            x->R.store(t->epoch, std::memory_order_relaxed);
-            e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_READ),
-                              std::memory_order_release);
-            return;
-
-        case ShareState::OWNED_READ:
-        case ShareState::OWNED_WRITE:
-            if (owner == t->tid) {
-                x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                x->R.store(t->epoch, std::memory_order_relaxed);
-                return;
-            }
-            // Different owner — seed FT from what the previous owner stored.
-            // Acquire load of owner_clock pairs with the owner's relaxed stores
-            // transitively through the hot_word release/acquire chain.
-            if (ss == ShareState::OWNED_WRITE) {
-                x->W.store(make_epoch(owner,
-                               x->owner_clock.load(std::memory_order_acquire)),
-                           std::memory_order_relaxed);
-                x->R.store(0, std::memory_order_relaxed);
-            } else {
-                x->W.store(0, std::memory_order_relaxed);
-                x->R.store(make_epoch(owner,
-                               x->owner_clock.load(std::memory_order_acquire)),
-                           std::memory_order_relaxed);
-            }
-            x->Rvc.clear();
-            e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
-                              std::memory_order_release);
-            {
-                bool raced = ft_read_core(addr, line_no, x, t);
-                if (!raced && can_reclaim(t, x)) {
-                    x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                    e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_READ),
-                                      std::memory_order_release);
-                }
-            }
-            return;
-
-        case ShareState::SHARED: {
-            bool raced = ft_read_core(addr, line_no, x, t);
-            if (!raced && can_reclaim(t, x)) {
-                x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                x->Rvc.clear();
-                e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_READ),
-                                  std::memory_order_release);
-            }
-            return;
-        }
-    }
-}
-
-void __ft_write(void* addr, int line_no) {
-    ThreadState* t = get_current_thread();
-
-    // ── FAST PATH ──────────────────────────────────────────────────
-    ShadowEntry* e = get_shadow_entry(addr);
-
-    uint64_t   hw    = e->hot_word.load(std::memory_order_acquire);
-    ShareState ss    = hot_state(hw);
-    int        owner = hot_owner(hw);
-
-    if ((ss == ShareState::OWNED_READ || ss == ShareState::OWNED_WRITE)
-        && owner == t->tid) {
-
-        // FIX BUG 3: acquire load of state pointer.
-        VarState* x = e->state.load(std::memory_order_acquire);
-        if (x) {
-            // FIX BUG 2 + 1: atomic reads of self_clock/self_epoch;
-            //                 atomic stores to x->* fields.
-            int   ck = t->self_clock.load(std::memory_order_relaxed);
-            Epoch ep = t->self_epoch.load(std::memory_order_relaxed);
-            x->owner_clock.store(ck, std::memory_order_relaxed);
-            x->W.store(ep,           std::memory_order_relaxed);
-            x->R.store(0,            std::memory_order_relaxed);
-        }
-        // Upgrade to OWNED_WRITE if needed.
-        if (ss != ShareState::OWNED_WRITE)
-            e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                              std::memory_order_release);
-        return;   // ← HOT PRIVATE WRITE PATH ENDS HERE
-    }
-
-    // ── SLOW PATH ──────────────────────────────────────────────────
-    VarState* x = get_or_alloc_var_state(e);
-    std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
-    std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
-
-    hw    = e->hot_word.load(std::memory_order_acquire);
-    ss    = hot_state(hw);
-    owner = hot_owner(hw);
-
-    switch (ss) {
-        case ShareState::UNACCESSED:
-            x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-            x->W.store(t->epoch, std::memory_order_relaxed);
-            x->R.store(0,        std::memory_order_relaxed);
-            e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                              std::memory_order_release);
-            return;
-
-        case ShareState::OWNED_READ:
-        case ShareState::OWNED_WRITE:
-            if (owner == t->tid) {
-                x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                x->W.store(t->epoch, std::memory_order_relaxed);
-                x->R.store(0,        std::memory_order_relaxed);
-                e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                                  std::memory_order_release);
-                return;
-            }
-            // Seed FT from the previous owner's epoch.
-            if (ss == ShareState::OWNED_WRITE) {
-                x->W.store(make_epoch(owner,
-                               x->owner_clock.load(std::memory_order_acquire)),
-                           std::memory_order_relaxed);
-                x->R.store(0, std::memory_order_relaxed);
-            } else {
-                x->W.store(0, std::memory_order_relaxed);
-                x->R.store(make_epoch(owner,
-                               x->owner_clock.load(std::memory_order_acquire)),
-                           std::memory_order_relaxed);
-            }
-            x->Rvc.clear();
-            e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
-                              std::memory_order_release);
-            {
-                bool raced = ft_write_core(addr, line_no, x, t);
-                if (!raced && can_reclaim(t, x)) {
-                    x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                    x->R.store(0, std::memory_order_relaxed);
-                    x->Rvc.clear();
-                    e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                                      std::memory_order_release);
-                }
-            }
-            return;
-
-        case ShareState::SHARED: {
-            bool raced = ft_write_core(addr, line_no, x, t);
-            if (!raced && can_reclaim(t, x)) {
-                x->owner_clock.store(t->C[t->tid], std::memory_order_relaxed);
-                x->R.store(0, std::memory_order_relaxed);
-                x->Rvc.clear();
-                e->hot_word.store(pack_hot(t->tid, ShareState::OWNED_WRITE),
-                                  std::memory_order_release);
-            }
-            return;
-        }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────
-// 12. THREAD LIFECYCLE CALLBACKS
-// ──────────────────────────────────────────────────────────────────
-
+// ------------------------------------------------------------
+// Thread context passed from parent → child
+// ------------------------------------------------------------
 struct ThreadContext {
-    void* (*original_routine)(void*);
-    void* original_arg;
+    void *(*original_routine)(void *);
+    void *original_arg;
+
     std::vector<int> parent_vc_snapshot;
 };
 
-void* __ft_prepare_context(void* routine, void* arg) {
-    ThreadContext* ctx = new ThreadContext();
-    ctx->original_routine = (void*(*)(void*))routine;
-    ctx->original_arg     = arg;
-    ThreadState* parent = get_current_thread();
-    std::lock_guard<std::recursive_mutex> lk(parent->mtx);
-    ctx->parent_vc_snapshot = parent->C;
-    return ctx;
-}
+extern "C" {
 
-void* thread_wrapper(void* raw_args) {
-    ThreadContext* ctx   = (ThreadContext*)raw_args;
-    ThreadState*   child = get_current_thread();
-    {
-        std::lock_guard<std::recursive_mutex> lk(child->mtx);
-        child->C = ctx->parent_vc_snapshot;
-        if (child->tid >= (int)child->C.size())
-            child->C.resize(child->tid + 1, 0);
-        child->C[child->tid] = 1;
-        child->epoch = make_epoch(child->tid, child->C[child->tid]);
-        child->sync_self_atomics();   // FIX: keep atomics in sync
-    }
-    void* result = ctx->original_routine(ctx->original_arg);
-    delete ctx;
-    tl_thread_state = nullptr;
-    return result;
-}
+    // ------------------------------------------------------------
+    // Thread trampoline (child-side)
+    // ------------------------------------------------------------
+    void* __ft_prepare_context(void* routine, void* arg) {
+        ThreadContext* ctx = new ThreadContext();
+        ctx->original_routine = (void*(*)(void*))routine;
+        ctx->original_arg = arg;
 
-void __ft_thread_create(uint64_t /*child_id_raw*/) {
-    ThreadState* parent = get_current_thread();
-    std::lock_guard<std::recursive_mutex> lk(parent->mtx);
-    parent->C[parent->tid]++;
-    parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
-    parent->sync_self_atomics();   // FIX: keep atomics in sync
-}
-
-void __ft_thread_join(uint64_t child_raw_id) {
-    ThreadState* parent = get_current_thread();
-    ThreadState* child  = nullptr;
-    std::map<pthread_t, ThreadState*>::iterator it;
-    {
-        std::lock_guard<std::recursive_mutex> lk(get_thread_map_lock());
-        auto& threads = get_threads_map();
-        it = threads.find((pthread_t)child_raw_id);
-        if (it != threads.end()) child = it->second;
-    }
-    if (!child) {
-        printf("[FastTrack] WARNING: joined thread %lu not found.\n",
-               (unsigned long)child_raw_id);
-        return;
-    }
-    {
-        std::lock_guard<std::recursive_mutex> pl(parent->mtx);
-        std::lock_guard<std::recursive_mutex> cl(child->mtx);
-        size_t len = std::max(parent->C.size(), child->C.size());
-        if (parent->C.size() < len) parent->C.resize(len, 0);
-        for (size_t i = 0; i < child->C.size(); ++i)
-            if (child->C[i] > parent->C[i]) parent->C[i] = child->C[i];
+        // CAPTURE PARENT'S CURRENT CLOCK
+        ThreadState* parent = get_current_thread();
+        
+        std::lock_guard<std::recursive_mutex> lock(parent->mtx);
+        // Increment the parent thread before the child starts, to reflect the fork event in the parent's timeline.
+        parent->C[parent->tid]++;
         parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
-        parent->sync_self_atomics();   // FIX: keep atomics in sync
-        // Parent's VC now dominates the child's. On the parent's next access
-        // to any SHARED variable last touched only by this child, can_reclaim()
-        // returns true and the variable transitions back to OWNED_*.
+
+        ctx->parent_vc_snapshot = parent->C;
+        return ctx;
     }
-    {
-        std::lock_guard<std::recursive_mutex> lk(get_thread_map_lock());
-        get_threads_map().erase(it);
+
+
+    void* thread_wrapper(void* raw_args) {
+        ThreadContext* ctx = (ThreadContext*)raw_args;
+
+        // 1. Get Child Thread State
+        ThreadState* child = get_current_thread();
+
+        // 2. INHERIT HISTORY (FastTrack Logic)
+        {
+            std::lock_guard<std::recursive_mutex> lock(child->mtx);
+            
+            // Step A: Copy parent's snapshot into child's VC
+            // Child.C = Parent.Snapshot
+            child->C = ctx->parent_vc_snapshot;
+            
+            // Step B: Ensure vector is large enough for Child's TID
+            if ((size_t)child->tid >= child->C.size()) {
+                child->C.resize(child->tid + 1, 0);
+            }
+            
+            // Step C: Start Child's own timeline
+            // Child.C[Child.tid] = 1 (or increment if we inherited something)
+            child->C[child->tid] = 1;
+
+            // Step D: Update the invariant Epoch cache
+            child->epoch = make_epoch(child->tid, child->C[child->tid]);
+        }
+
+        // printf("[FastTrack] Thread %d STARTED\n", child->tid);
+
+        // 3. Run User Code
+        void* result = ctx->original_routine(ctx->original_arg);
+
+        // 4. Cleanup
+        delete ctx;
+        tl_thread_state = nullptr;
+        return result;
     }
-    delete child;
+
+
+
+    // ------------------------------------------------------------
+    // THREAD CREATION (parent-side)
+    // ------------------------------------------------------------
+
+    void __ft_thread_create(uint64_t child_id_raw) {
+        // Already incrementing before thread_create.
+        // 1. Get Parent Thread State
+        // ThreadState* parent = get_current_thread();
+
+        // // 2. Increment Parent's Clock
+        // {
+        //     std::lock_guard<std::recursive_mutex> lock(parent->mtx);
+            
+        //     // Parent.C[Parent.tid]++
+        //     parent->C[parent->tid]++;
+            
+        //     // Update invariant
+        //     parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
+        // }
+        
+        // // printf("[FastTrack] Thread %d created new thread (Raw ID: %lu)\n", 
+        // //        parent->tid, (unsigned long)child_id_raw);
+    }
+
+    void __ft_thread_join(uint64_t child_raw_id) {
+        // 1. IDENTIFY PARENT (Current Thread)
+        // The thread calling join() is the parent.
+        ThreadState* parent = get_current_thread();
+
+        // 2. IDENTIFY CHILD (From Argument)
+        ThreadState* child = nullptr;
+
+        std::map<pthread_t, ThreadState*>::iterator it;
+        {
+            std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
+            auto& threads = get_threads_map();
+            it = threads.find((pthread_t)child_raw_id);
+            if (it != threads.end()) {
+                child = it->second;
+            }
+        }
+
+        if (!child) 
+        {
+            std::cout << "[FastTrack] WARNING: Joined thread with raw ID " << (unsigned long)child_raw_id 
+                 << " not found in registry. Skipping FastTrack join logic." << std::endl;
+            // Child might not have been instrumented or created via our hooks
+            return;
+        }
+
+        {
+            // 3. FASTTRACK JOIN LOGIC
+            // Rule: Parent.C = max(Parent.C, Child.C)
+            std::lock_guard<std::recursive_mutex> parent_lock(parent->mtx);
+            std::lock_guard<std::recursive_mutex> child_lock(child->mtx);
+
+            size_t len = std::max(parent->C.size(), child->C.size());
+            
+            // Resize parent if needed
+            if (parent->C.size() < len) {
+                parent->C.resize(len, 0);
+            }
+
+            // Merge Child's clock into Parent's clock
+            for (size_t i = 0; i < child->C.size(); i++) {
+                if (child->C[i] > parent->C[i]) {
+                    parent->C[i] = child->C[i];
+                }
+            }
+
+            // Update Parent's epoch cache since its VC changed
+            parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
+        }
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(get_thread_map_lock());
+            get_threads_map().erase(it);
+        }
+
+        delete child;
+        // printf("[FastTrack] Thread %d (Parent) joined with Thread %d (Child)\n", 
+        //     parent->tid, child->tid);
+    }
+
+    // ------------------------------------------------------------
+    // MEMORY EVENTS
+    // ------------------------------------------------------------
+    void __ft_read(void* addr, int line_no) {
+
+        ThreadState* t = get_current_thread();
+        VarState* x = get_var_state(addr);
+
+        // Lock the variable metadata
+        std::lock_guard<std::recursive_mutex> lock(x->mtx);
+        std::lock_guard<std::recursive_mutex> lock2(t->mtx);
+
+        // ---------------------------------------------------------
+        // ALGORITHM START
+        // ---------------------------------------------------------
+
+        // 1. Same Epoch Check (Fast Path)
+        if (x->R == t->epoch) return;
+
+        // 2. Write-Read Race Check
+        // if (x.W > t.C[TID(x.W)]) error;
+        int w_tid = get_tid(x->W);
+        int w_clock = get_clock(x->W);
+        if (w_clock > t->get_clock_of(w_tid)) {
+            report_race("W-R", addr, w_tid, t->tid, line_no);
+            x->W = 0;
+        }
+
+        // 3. Update Read State
+        if (x->R == READ_SHARED) {
+            // Shared State
+            vec_set_epoch(x->Rvc, t->tid, t->epoch);
+        }
+        else {
+            // Exclusive State
+            int r_tid = get_tid(x->R);
+            int r_clock = get_clock(x->R);
+
+            // Check if the previous read happened-before current thread
+            if (r_clock <= t->get_clock_of(r_tid)) {
+                // Exclusive ownership transfers to us
+                x->R = t->epoch;
+            } 
+            else {
+                Epoch old_R = x->R;
+                x->Rvc.clear();
+                
+                // Record both the previous reader and current reader
+                vec_set_epoch(x->Rvc, r_tid, old_R);
+                vec_set_epoch(x->Rvc, t->tid, t->epoch);
+                
+                x->R = READ_SHARED;
+            }
+        }
+    }
+
+    void __ft_write(void* addr, int line_no) {
+
+        ThreadState* t = get_current_thread();
+        VarState* x = get_var_state(addr);
+
+        std::lock_guard<std::recursive_mutex> lock(x->mtx);
+        std::lock_guard<std::recursive_mutex> lock2(t->mtx);
+
+        // 1. Same Epoch Check (Fast Path)
+        if (x->W == t->epoch) return;
+
+        // 2. Write-Write Race Check
+        // if (x.W > t.C[TID(x.W)]) error;
+        int w_tid = get_tid(x->W);
+        int w_clock = get_clock(x->W);
+        if (w_clock > t->get_clock_of(w_tid)) {
+            report_race("W-W", addr, w_tid, t->tid, line_no);
+        }
+
+        // 3. Read-Write Race Check
+        if (x->R != READ_SHARED) {
+            // Shared Check (Exclusive Read case)
+            // if (x.R > t.C[TID(x.R)]) error;
+            if (x->R != 0) { 
+                int r_tid = get_tid(x->R);
+                int r_clock = get_clock(x->R);
+                if (r_clock > t->get_clock_of(r_tid)) {
+                    report_race("R-W", addr, r_tid, t->tid, line_no);
+                }
+            }
+        } else {
+            // Shared Check (Vector Clock case)
+            // if (x.Rvc[u] > t.C[u] for any u) error; (SLOW PATH)
+            for (int i = 0; i < (int)x->Rvc.size(); ++i) {
+                if (x->Rvc[i] == 0) continue;
+                int u_clock = get_clock(x->Rvc[i]);
+                if (u_clock > t->get_clock_of(i)) {
+                    report_race("R-W", addr, i, t->tid, line_no);
+                }
+            }
+        }
+        // 4. Update Write State
+        // x.W = t.epoch;
+        x->W = t->epoch;
+        x->R = 0;
+        x->Rvc.clear();
+    }
+
+
+    // ------------------------------------------------------------
+    // LOCK EVENTS
+    // ------------------------------------------------------------
+
+    void __ft_lock(void* mutex_addr) {
+        ThreadState* t = get_current_thread();
+    
+        LockState* m = get_lock_state(mutex_addr);
+    
+        std::lock_guard<std::recursive_mutex> lock(m->mtx);
+        std::lock_guard<std::recursive_mutex> lock2(t->mtx);
+    
+        // FT vector clock merge
+        if (m->L.size() > t->C.size())
+            t->C.resize(m->L.size(), 0);
+        for (size_t i = 0; i < m->L.size(); i++)
+            if (m->L[i] > t->C[i]) t->C[i] = m->L[i];
+        t->epoch = make_epoch(t->tid, t->C[t->tid]);
+    }
+
+    void __ft_unlock(void* mutex_addr) {
+        ThreadState* t = get_current_thread();
+        LockState* m = get_lock_state(mutex_addr);
+
+        std::lock_guard<std::recursive_mutex> lock(m->mtx);
+        std::lock_guard<std::recursive_mutex> lock2(t->mtx);
+
+        // 1. RESIZE: If the thread knows about more threads than the lock,
+        if (t->C.size() > m->L.size()) {
+            m->L.resize(t->C.size(), 0);
+        }
+
+        // 2. UPDATE: Copy the Thread's clock to the Lock.
+        for (size_t i = 0; i < t->C.size(); i++) {
+            m->L[i] = t->C[i];
+        }
+
+        // 3. INCREMENT.
+        t->C[t->tid]++;
+        
+        // 4. Update the cached epoch invariant
+        t->epoch = make_epoch(t->tid, t->C[t->tid]);
+    }
+
 }
-
-// ──────────────────────────────────────────────────────────────────
-// 13. LOCK CALLBACKS
-// ──────────────────────────────────────────────────────────────────
-
-void __ft_lock(void* mutex_addr) {
-    ThreadState* t = get_current_thread();
-    LockState*   m = get_lock_state(mutex_addr);
-    std::lock_guard<std::recursive_mutex> lm(m->mtx);
-    std::lock_guard<std::recursive_mutex> lt(t->mtx);
-    if (m->L.size() > t->C.size()) t->C.resize(m->L.size(), 0);
-    for (size_t i = 0; i < m->L.size(); ++i)
-        if (m->L[i] > t->C[i]) t->C[i] = m->L[i];
-    t->epoch = make_epoch(t->tid, t->C[t->tid]);
-    t->sync_self_atomics();   // FIX: keep atomics in sync
-}
-
-void __ft_unlock(void* mutex_addr) {
-    ThreadState* t = get_current_thread();
-    LockState*   m = get_lock_state(mutex_addr);
-    std::lock_guard<std::recursive_mutex> lm(m->mtx);
-    std::lock_guard<std::recursive_mutex> lt(t->mtx);
-    if (t->C.size() > m->L.size()) m->L.resize(t->C.size(), 0);
-    for (size_t i = 0; i < t->C.size(); ++i) m->L[i] = t->C[i];
-    t->C[t->tid]++;
-    t->epoch = make_epoch(t->tid, t->C[t->tid]);
-    t->sync_self_atomics();   // FIX: keep atomics in sync
-}
-
-} // extern "C"
