@@ -25,6 +25,7 @@ struct VariableRaceSummary {
     RaceExample wr;
     RaceExample ww;
     RaceExample rw;
+    char* var_name;
 };
 
 // Global lock for the summary map
@@ -247,12 +248,12 @@ static LockState* get_lock_state(void* addr) {
     if (!sl.count(addr)) sl[addr] = new LockState();
     return sl[addr];
 }
-void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
+void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, char* var_name) {
     race_count.fetch_add(1, std::memory_order_relaxed);
     
     std::lock_guard<std::mutex> lock(get_race_summary_lock());
     auto& summary = get_race_summary()[addr];
-
+    if(var_name != nullptr)summary.var_name = var_name;
     // Record the first instance of each race type for this specific address
     if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
         summary.wr = {true, tid1, tid2, line_no};
@@ -275,6 +276,7 @@ void print_final_race_summary() {
         const auto& summary = pair.second;
 
         printf("Variable ADDR: %p\n", addr);
+        printf("Variable Name: %s\n", summary.var_name);
 
         if (summary.ww.occurred) {
             printf("  [W-W] Example: Thread %d and Thread %d at line %d\n",
@@ -338,7 +340,7 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 // FT CORE
 // ──────────────────────────────────────────────────────────────────
 // Called holding a lock over x and t so we can use relaxed mode
-static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
+static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t, char* var_name) {
     Epoch R = x->R.load(std::memory_order_relaxed);
     if (R == t->epoch) return false;
 
@@ -347,7 +349,7 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     int   w_clock = get_clock(W);
     bool raced = false;
     if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-R", addr, w_tid, t->tid, line_no);
+        report_race("W-R", addr, w_tid, t->tid, line_no, var_name);
         // Remove the previous write history
         x->W.store(0,        std::memory_order_relaxed);
         raced = true;
@@ -372,7 +374,7 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     return raced;
 }
 
-static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) {
+static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, char* var_name) {
     Epoch W = x->W.load(std::memory_order_relaxed);
     if (W == t->epoch) return false;
 
@@ -380,7 +382,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
     int  w_tid   = get_tid(W);
     int  w_clock = get_clock(W);
     if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-W", addr, w_tid, t->tid, line_no);
+        report_race("W-W", addr, w_tid, t->tid, line_no, var_name);
         raced = true;
     }
 
@@ -390,7 +392,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
             int r_tid   = get_tid(R);
             int r_clock = get_clock(R);
             if (r_clock > t->get_clock_of(r_tid)) {
-                report_race("R-W", addr, r_tid, t->tid, line_no);
+                report_race("R-W", addr, r_tid, t->tid, line_no, var_name);
                 raced = true;
             }
         }
@@ -398,7 +400,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
         for (int i = 0; i < (int)x->Rvc.size(); ++i) {
             if (x->Rvc[i] == 0) continue;
             if (get_clock(x->Rvc[i]) > t->get_clock_of(i)) {
-                report_race("R-W", addr, i, t->tid, line_no);
+                report_race("R-W", addr, i, t->tid, line_no, var_name);
                 raced = true;
             }
         }
@@ -420,7 +422,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) 
 // failure without duplicating the entire switch.
 // ──────────────────────────────────────────────────────────────────
 
-static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t) {
+static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -464,7 +466,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = ft_read_core(addr, line_no, x, t);
+                bool raced = ft_read_core(addr, line_no, x, t, var_name);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_epoch.store(
                         x->W.load(std::memory_order_relaxed),
@@ -478,7 +480,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
             return;
 
         case ShareState::SHARED: {
-            bool raced = ft_read_core(addr, line_no, x, t);
+            bool raced = ft_read_core(addr, line_no, x, t, var_name);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_epoch.store(
                     x->W.load(std::memory_order_relaxed),
@@ -493,7 +495,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
     }
 }
 
-static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* t) {
+static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -530,7 +532,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = ft_write_core(addr, line_no, x, t);
+                bool raced = ft_write_core(addr, line_no, x, t, var_name);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_epoch.store(t->epoch, std::memory_order_relaxed);
                     x->owner_read_epoch.store(0,         std::memory_order_relaxed);
@@ -543,7 +545,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
             return;
 
         case ShareState::SHARED: {
-            bool raced = ft_write_core(addr, line_no, x, t);
+            bool raced = ft_write_core(addr, line_no, x, t, var_name);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_epoch.store(t->epoch, std::memory_order_relaxed);
                 x->owner_read_epoch.store(0,         std::memory_order_relaxed);
@@ -575,7 +577,7 @@ extern "C" {
 //      • failure → another thread changed hot_word (stole ownership).
 //        Fall through to slow path to re-examine under var_lk.
 
-void __ft_read(void* addr, int line_no) {
+void __ft_read(void* addr, int line_no, char* var_name) {
     ThreadState* t = get_current_thread();
     ShadowEntry* e = get_shadow_entry(addr);
 
@@ -609,7 +611,7 @@ void __ft_read(void* addr, int line_no) {
         }
     }
 
-    ft_slow_read(addr, line_no, e, t);
+    ft_slow_read(addr, line_no, e, t, var_name);
 }
 
 // ── __ft_write ──────────────────────────────────────────────────
@@ -622,7 +624,7 @@ void __ft_read(void* addr, int line_no) {
 //      • success → Return.
 //      • failure → fall to slow path.
 
-void __ft_write(void* addr, int line_no) {
+void __ft_write(void* addr, int line_no, char* var_name) {
     ThreadState* t = get_current_thread();
     ShadowEntry* e = get_shadow_entry(addr);
 
@@ -648,7 +650,7 @@ void __ft_write(void* addr, int line_no) {
         }
     }
 
-    ft_slow_write(addr, line_no, e, t);
+    ft_slow_write(addr, line_no, e, t, var_name);
 }
 
 // ──────────────────────────────────────────────────────────────────

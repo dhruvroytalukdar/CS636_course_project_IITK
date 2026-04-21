@@ -9,32 +9,29 @@ TSAN_FLAGS = -fsanitize=thread -g -O1
 # ──────────────────────────────────────────────────────────────────
 # SOURCE FILES
 # ──────────────────────────────────────────────────────────────────
-# PASS_SRC       := fasttrack_instrumentation_ver2.cpp
-PASS_SRC       := fasttrack_instrumentation.cpp
+PASS_SRC       := fasttrack_instrumentation_ver2.cpp
+# PASS_SRC       := fasttrack_instrumentation.cpp
 PASS_NAME      := fasttrack-pass
 
 
 ESCAPE_PASS_SRC := escape_instrumentation.cpp 
 # TARGET_DIR     := targets/old_targets_dhruv
-TARGET_DIR     := ./targets/old_targets_dhruv
+TARGET_DIR     := targets/old_targets_dhruv
 
-RUNTIME_FT     := fasttrack_runtime.cpp
-# RUNTIME_FT     := fasttrack_runtime_unique.cpp
-# RUNTIME_SA     := fasttrack_runtime_with_sa_unique.cpp
-RUNTIME_SA     := fasttrack_runtime_with_sa_ver6.cpp
-TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
-# TARGET_SRC     := ./testing_temp_dir/src/sharing_patterns.cpp 
+# RUNTIME_FT     := fasttrack_runtime.cpp
+RUNTIME_FT     := fasttrack_runtime_unique.cpp
+RUNTIME_SA     := fasttrack_runtime_with_sa_unique.cpp
+# RUNTIME_SA     := fasttrack_runtime.cpp
+# RUNTIME_SA     := fasttrack_runtime_with_sa_ver6.cpp
+# TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
+TARGET_SRC     := ./testing_temp_dir/src/test.cpp 
 
-BUILD_DIR := build
 SA_TEST_SRC    := sa_correctness_test.cpp
-TARGET_NAME := $(notdir $(basename $(TARGET_SRC)))
 
-TARGET_BC      := $(BUILD_DIR)/$(TARGET_NAME).bc
-TARGET_INST_BC := $(BUILD_DIR)/$(TARGET_NAME)_inst.bc
-TARGET_LL      := $(BUILD_DIR)/$(TARGET_NAME).ll
 # ──────────────────────────────────────────────────────────────────
 # BUILD DIRECTORY — all generated files live here
 # ──────────────────────────────────────────────────────────────────
+BUILD_DIR := build
 
 # ──────────────────────────────────────────────────────────────────
 # DERIVED PATHS  (all inside BUILD_DIR)
@@ -42,9 +39,9 @@ TARGET_LL      := $(BUILD_DIR)/$(TARGET_NAME).ll
 PLUGIN         := $(BUILD_DIR)/llvmpass.so
 ESCAPE_PASS_OBJ := $(BUILD_DIR)/escape_instpass.so
 
-# TARGET_BC      := $(BUILD_DIR)/efficiency.bc
-# TARGET_INST_BC := $(BUILD_DIR)/efficiency_inst.bc
-# TARGET_LL      := $(BUILD_DIR)/$(basename $(TARGET_SRC)).ll
+TARGET_BC      := $(BUILD_DIR)/efficiency.bc
+TARGET_INST_BC := $(BUILD_DIR)/efficiency_inst.bc
+TARGET_LL      := $(BUILD_DIR)/$(basename $(TARGET_SRC)).ll
 
 RUNTIME_FT_OBJ    := $(BUILD_DIR)/runtime_ft.o
 RUNTIME_SA_OBJ    := $(BUILD_DIR)/runtime_sa.o
