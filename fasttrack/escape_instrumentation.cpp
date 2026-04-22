@@ -17,9 +17,9 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/DebugLoc.h"
 #include <llvm/IR/PassManager.h>
-#include <llvm-20/llvm/ADT/StringRef.h>
-#include <llvm-20/llvm/IR/GlobalValue.h>
-#include <llvm-20/llvm/IR/GlobalVariable.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/IR/GlobalValue.h>
+#include <llvm/IR/GlobalVariable.h>
 #include<map>
 
 
@@ -796,6 +796,12 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
 
                         // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
                         Value *ChildRawId = CB->getArgOperand(0);
+
+                        if (ChildRawId->getType()->isPointerTy()) {
+                            ChildRawId = B.CreatePtrToInt(ChildRawId, Int64Ty);
+                        } else if (ChildRawId->getType() != Int64Ty) {
+                            ChildRawId = B.CreateZExtOrTrunc(ChildRawId, Int64Ty);
+                        }
 
                         // Inject call: __wcp_thread_join(child_pthread_t)
                         // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)

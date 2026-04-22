@@ -21,7 +21,7 @@
 #include "llvm/IR/InstrTypes.h" 
 using namespace llvm;
 
-#define RUNTIME 2
+#define RUNTIME 1
 //runtime = 1 dhruv Ft 
 //runtime = 2 wcp 
 //runtime = 3 my Ft

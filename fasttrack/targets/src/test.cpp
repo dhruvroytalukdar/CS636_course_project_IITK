@@ -44,5 +44,8 @@ static void test5_escape_via_vector() {
 
 int main(){
     test5_escape_via_vector();
+    for(int i=0;i<g_ptrs.size();i++){
+        cout << g_ptrs[i] << endl;
+    }
     return 0;
 }

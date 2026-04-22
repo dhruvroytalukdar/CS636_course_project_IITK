@@ -163,15 +163,17 @@ static std::atomic<int> next_tid   {1};
 static std::atomic<int> race_count {0};
 static ShadowEntry      shadow_table[SHADOW_SIZE];
 static thread_local ThreadState* tl_thread_state = nullptr;
+static thread_local bool in_ft_runtime = false;
+
 
 static std::recursive_mutex& get_thread_map_lock() {
-    static std::recursive_mutex m; return m;
+    static auto* m = new std::recursive_mutex(); return *m;
 }
 static std::map<pthread_t, ThreadState*>& get_threads_map() {
     static auto* m = new std::map<pthread_t, ThreadState*>(); return *m;
 }
 static std::recursive_mutex& get_lock_registry_lock() {
-    static std::recursive_mutex m; return m;
+    static auto* m = new std::recursive_mutex(); return *m;
 }
 static std::unordered_map<void*, LockState*>& get_shadow_locks() {
     static auto* m = new std::unordered_map<void*, LockState*>(); return *m;
@@ -578,6 +580,10 @@ extern "C" {
 //        Fall through to slow path to re-examine under var_lk.
 
 void __ft_read(void* addr, int line_no, char* var_name) {
+    if (in_ft_runtime) return;
+    struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
+    in_ft_runtime = true;
+    
     ThreadState* t = get_current_thread();
     ShadowEntry* e = get_shadow_entry(addr);
 
@@ -625,6 +631,10 @@ void __ft_read(void* addr, int line_no, char* var_name) {
 //      • failure → fall to slow path.
 
 void __ft_write(void* addr, int line_no, char* var_name) {
+    if (in_ft_runtime) return;
+    struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
+    in_ft_runtime = true;
+    
     ThreadState* t = get_current_thread();
     ShadowEntry* e = get_shadow_entry(addr);
 
@@ -669,6 +679,9 @@ void* __ft_prepare_context(void* routine, void* arg) {
     ctx->original_arg     = arg;
     ThreadState* parent = get_current_thread();
     std::lock_guard<std::recursive_mutex> lk(parent->mtx);
+    parent->C[parent->tid]++;
+    parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
+    parent->sync_self_atomics();
     ctx->parent_vc_snapshot = parent->C;
     return ctx;
 }
@@ -692,11 +705,11 @@ void* thread_wrapper(void* raw_args) {
 }
 
 void __ft_thread_create(uint64_t /*child_id_raw*/) {
-    ThreadState* parent = get_current_thread();
-    std::lock_guard<std::recursive_mutex> lk(parent->mtx);
-    parent->C[parent->tid]++;
-    parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
-    parent->sync_self_atomics();
+    // ThreadState* parent = get_current_thread();
+    // std::lock_guard<std::recursive_mutex> lk(parent->mtx);
+    // parent->C[parent->tid]++;
+    // parent->epoch = make_epoch(parent->tid, parent->C[parent->tid]);
+    // parent->sync_self_atomics();
 }
 
 void __ft_thread_join(uint64_t child_raw_id) {

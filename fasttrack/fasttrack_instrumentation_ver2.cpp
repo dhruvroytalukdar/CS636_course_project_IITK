@@ -1,6 +1,6 @@
-#include <llvm-20/llvm/ADT/StringRef.h>
-#include <llvm-20/llvm/IR/GlobalValue.h>
-#include <llvm-20/llvm/IR/GlobalVariable.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/IR/GlobalValue.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include "llvm/Analysis/ValueTracking.h"
 #include <llvm/IR/Instructions.h>

@@ -46,149 +46,124 @@ struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
         FunctionCallee ThreadWrapper =
             M.getOrInsertFunction("thread_wrapper",
                                   VoidPtrTy, VoidPtrTy);
-
         for (Function &F : M) {
             if (F.isDeclaration())
                 continue;
 
+            std::vector<Instruction*> Worklist;
             for (BasicBlock &BB : F) {
                 for (Instruction &I : BB) {
+                    Worklist.push_back(&I);
+                }
+            }
 
-                    // ---------------- LOAD ----------------
-                    if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                        IRBuilder<> B(&I); // Insert before the load
-                        
-                        // 1. Extract the Line Number from debug metadata
-                        int line_no = 0;
-                        if (const DebugLoc &Loc = I.getDebugLoc()) {
-                            line_no = Loc.getLine();
-                        }
-                        
-                        // 2. Create an LLVM Constant Integer for the line number
-                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+            // Helper lambda to safely find the next insertion point.
+            // If the call is an InvokeInst (which terminates a block), it 
+            // safely jumps to the beginning of the success block.
+            auto getSafeNextNode = [](CallBase *CB) -> Instruction* {
+                if (auto *Invoke = dyn_cast<InvokeInst>(CB)) {
+                    return &*Invoke->getNormalDest()->getFirstInsertionPt();
+                }
+                return CB->getNextNode();
+            };
 
-                        // 3. Pass the pointer and the line number to the runtime
-                        B.CreateCall(FtRead, {LI->getPointerOperand(), LineArg});
-                        continue;
+            for (Instruction *InstPtr : Worklist) {
+                Instruction &I = *InstPtr;
+
+                // ---------------- LOAD ----------------
+                if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                    IRBuilder<> B(&I); 
+                    int line_no = 0;
+                    if (const DebugLoc &Loc = I.getDebugLoc()) {
+                        line_no = Loc.getLine();
+                    }
+                    Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+                    B.CreateCall(FtRead, {LI->getPointerOperand(), LineArg});
+                    continue;
+                }
+
+                // ---------------- STORE ----------------
+                if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                    IRBuilder<> B(&I); 
+                    int line_no = 0;
+                    if (const DebugLoc &Loc = I.getDebugLoc()) {
+                        line_no = Loc.getLine();
+                    }
+                    Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+                    B.CreateCall(FtWrite, {SI->getPointerOperand(), LineArg});
+                    continue;
+                }
+
+                // ---------------- CALL / INVOKE ----------------
+                auto *CB = dyn_cast<CallBase>(&I);
+                if (!CB) continue;
+
+                Value *Callee = CB->getCalledOperand()->stripPointerCasts();
+                Function *CalledFunc = dyn_cast<Function>(Callee);
+                if (!CalledFunc) continue;
+
+                StringRef Name = CalledFunc->getName();
+
+                // ---- pthread_mutex_lock ----
+                if (Name.contains("pthread_mutex_lock")) {
+                    // FIX 2: Safely get the next node
+                    IRBuilder<> B(getSafeNextNode(CB));
+                    B.CreateCall(FtLock, {CB->getArgOperand(0)});
+                    continue;
+                }
+
+                // ---- pthread_mutex_unlock ----
+                if (Name.contains("pthread_mutex_unlock")) {
+                    IRBuilder<> B(CB);
+                    B.CreateCall(FtUnlock, {CB->getArgOperand(0)});
+                    continue;
+                }
+
+                // ---- pthread_cond_wait ----
+                if (Name.contains("pthread_cond_wait")) {
+                    Value *MutexArg = CB->getArgOperand(1);
+                    IRBuilder<> PreB(CB);
+                    PreB.CreateCall(FtUnlock, {MutexArg});
+
+                    // FIX 2: Safely get the next node
+                    IRBuilder<> PostB(getSafeNextNode(CB));
+                    PostB.CreateCall(FtLock, {MutexArg});
+                    continue;
+                }
+
+                // ---- pthread_join ----
+                if (Name.contains("pthread_join")) {
+                    IRBuilder<> B(getSafeNextNode(CB));
+                    Value *ChildRawId = CB->getArgOperand(0);
+
+                    if (ChildRawId->getType()->isPointerTy()) {
+                        ChildRawId = B.CreatePtrToInt(ChildRawId, Int64Ty);
+                    } else if (ChildRawId->getType() != Int64Ty) {
+                        ChildRawId = B.CreateZExtOrTrunc(ChildRawId, Int64Ty);
                     }
 
-                    // ---------------- STORE ----------------
-                    if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                        IRBuilder<> B(&I); // Insert before the store
-                        
-                        // 1. Extract the Line Number from debug metadata
-                        int line_no = 0;
-                        if (const DebugLoc &Loc = I.getDebugLoc()) {
-                            line_no = Loc.getLine();
-                        }
-                        
-                        // 2. Create an LLVM Constant Integer for the line number
-                        Value *LineArg = ConstantInt::get(Int32Ty, line_no);
+                    B.CreateCall(FtThreadJoin, {ChildRawId});
+                    continue;
+                }
 
-                        // 3. Pass the pointer and the line number to the runtime
-                        B.CreateCall(FtWrite, {SI->getPointerOperand(), LineArg});
-                        continue;
-                    }
+                // ---- pthread_create ----
+                if (Name.contains("pthread_create")) {
+                    IRBuilder<> PreBuilder(CB);
 
-                    // ---------------- CALL / INVOKE ----------------
-                    auto *CB = dyn_cast<CallBase>(&I);
-                    if (!CB)
-                        continue;
+                    Value *OrigFunc = CB->getArgOperand(2);
+                    Value *OrigArg  = CB->getArgOperand(3);
 
-                    Value *Callee =
-                        CB->getCalledOperand()->stripPointerCasts();
-                    Function *CalledFunc =
-                        dyn_cast<Function>(Callee);
-                    if (!CalledFunc)
-                        continue;
+                    Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
 
-                    StringRef Name = CalledFunc->getName();
+                    CB->setArgOperand(2, ThreadWrapper.getCallee());
+                    CB->setArgOperand(3, CtxMem);
 
-                    // ---- pthread_mutex_lock ----
-                    if (Name.contains("pthread_mutex_lock")) {
-                        IRBuilder<> B(CB->getNextNode());
-                        B.CreateCall(FtLock,
-                                     {CB->getArgOperand(0)});
-                        continue;
-                    }
-
-                    // ---- pthread_mutex_unlock ----
-                    if (Name.contains("pthread_mutex_unlock")) {
-                        IRBuilder<> B(CB);
-                        B.CreateCall(FtUnlock,
-                                     {CB->getArgOperand(0)});
-                        continue;
-                    }
-
-                    // ---- pthread_cond_wait ----
-                    if (Name.contains("pthread_cond_wait")) {
-                        Value *MutexArg = CB->getArgOperand(1);
-
-                        IRBuilder<> PreB(CB);
-                        PreB.CreateCall(FtUnlock, {MutexArg});
-
-                        IRBuilder<> PostB(CB->getNextNode());
-                        PostB.CreateCall(FtLock, {MutexArg});
-
-                        continue;
-                    }
-
-                    // ---- pthread_join ----
-                    if (Name.contains("pthread_join")) {
-                        // We insert AFTER the join call returns.
-                        // This represents the point where Parent is guaranteed that Child has finished.
-                        IRBuilder<> B(CB->getNextNode());
-
-                        // Argument 0 of pthread_join is the 'pthread_t' of the child thread.
-                        Value *ChildRawId = CB->getArgOperand(0);
-
-                        // Inject call: __ft_thread_join(child_pthread_t)
-                        // Note: FtThreadJoin must be defined in your module (VoidTy, {Int8PtrTy} or similar)
-                        B.CreateCall(FtThreadJoin, {ChildRawId});
-
-                        continue;
-                    }
-
-                    // ---- pthread_create ----
-                    if (Name.contains("pthread_create")) {
-
-                        // -------------------------------------------------
-                        // PART 1: PRE-CALL INSTRUMENTATION
-                        // -------------------------------------------------
-                        IRBuilder<> PreBuilder(CB);
-
-                        // 1. Get the original function (Arg 2) and original argument (Arg 3)
-                        Value *OrigFunc = CB->getArgOperand(2);
-                        Value *OrigArg  = CB->getArgOperand(3);
-
-                        // 2. Call the C++ Runtime Helper: __ft_prepare_context(func, arg)
-                        // This helper will:
-                        //    a) Allocate the ThreadContext (using 'new')
-                        //    b) Snapshot the Parent's Vector Clock
-                        //    c) Return the pointer to the context
-                        Value *CtxMem = PreBuilder.CreateCall(FtPrepareContext, {OrigFunc, OrigArg});
-
-                        // 3. SWAP ARGUMENTS
-                        // Replace the function with our wrapper
-                        CB->setArgOperand(2, ThreadWrapper.getCallee());
-                        // Replace the argument with the context returned by our helper
-                        CB->setArgOperand(3, CtxMem);
-
-
-                        // -------------------------------------------------
-                        // PART 2: POST-CALL INSTRUMENTATION
-                        // (This part remains exactly the same as you had it)
-                        // -------------------------------------------------
-                        IRBuilder<> PostBuilder(CB->getNextNode());
-
-                        Value *ThreadIdPtr = CB->getArgOperand(0);
-                        // Assuming pthread_t is 64-bit on your target
-                        Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
-                        
-                        PostBuilder.CreateCall(FtThreadCreate, {ChildId});
-
-                        continue;
-                    }
+                    IRBuilder<> PostBuilder(getSafeNextNode(CB));
+                    Value *ThreadIdPtr = CB->getArgOperand(0);
+                    Value *ChildId = PostBuilder.CreateLoad(Int64Ty, ThreadIdPtr);
+                    
+                    PostBuilder.CreateCall(FtThreadCreate, {ChildId});
+                    continue;
                 }
             }
         }

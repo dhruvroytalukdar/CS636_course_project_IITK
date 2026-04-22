@@ -116,11 +116,11 @@ static std::atomic<int> race_count{0};
 static ShadowEntry shadow_table[SHADOW_SIZE];
 
 static thread_local ThreadState* tl_thread_state = nullptr;
+static thread_local bool in_ft_runtime = false;
 
 // Thread Registry Accessors
 std::recursive_mutex& get_thread_map_lock() {
-    static std::recursive_mutex mtx;
-    return mtx;
+    static auto* mtx = new std::recursive_mutex(); return *mtx;
 }
 std::map<pthread_t, ThreadState*>& get_threads_map() {
     static auto* threads = new std::map<pthread_t, ThreadState*>();
@@ -128,8 +128,7 @@ std::map<pthread_t, ThreadState*>& get_threads_map() {
 }
 
 std::recursive_mutex& get_shadow_lock() {
-    static std::recursive_mutex mtx;
-    return mtx;
+    static auto* mtx = new std::recursive_mutex(); return *mtx;
 }
 std::unordered_map<void*, VarState*>& get_shadow_vars() {
     static auto* shadow_vars = new std::unordered_map<void*, VarState*>();
@@ -138,8 +137,7 @@ std::unordered_map<void*, VarState*>& get_shadow_vars() {
 
 // Lock Registry Accessors
 std::recursive_mutex& get_lock_registry_lock() {
-    static std::recursive_mutex mtx;
-    return mtx;
+    static auto* mtx = new std::recursive_mutex(); return *mtx;
 }
 std::unordered_map<void*, LockState*>& get_shadow_locks() {
     static auto* shadow_locks = new std::unordered_map<void*, LockState*>();
@@ -437,6 +435,9 @@ extern "C" {
     // MEMORY EVENTS
     // ------------------------------------------------------------
     void __ft_read(void* addr, int line_no, char* var_name) {
+        if (in_ft_runtime) return;
+        struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
+        in_ft_runtime = true;
 
         ThreadState* t = get_current_thread();
         VarState* x = get_var_state(addr);
@@ -490,7 +491,9 @@ extern "C" {
     }
 
     void __ft_write(void* addr, int line_no, char* var_name) {
-
+        if (in_ft_runtime) return;
+        struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
+        in_ft_runtime = true;
         ThreadState* t = get_current_thread();
         VarState* x = get_var_state(addr);
 

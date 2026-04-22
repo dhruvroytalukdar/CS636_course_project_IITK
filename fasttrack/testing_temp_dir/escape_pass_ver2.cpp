@@ -16,7 +16,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
-#define RUNTIME 3
+#define RUNTIME 2
 //3 = my ft.
 //2 - dhruv_Ft
 //1 wcp

@@ -2,9 +2,11 @@ CXX         := clang++
 OPT         := opt
 LLVM_CONFIG := llvm-config
 
-CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags)
-LDFLAGS  := $(shell $(LLVM_CONFIG) --ldflags)
-TSAN_FLAGS = -fsanitize=thread -g -O1
+LLVM_LIBDIR := $(shell $(LLVM_CONFIG) --libdir)
+LIBCPP_DIR  := $(shell dirname $$(find $(LLVM_LIBDIR) -name "libc++.so.1" 2>/dev/null | head -n 1))
+CXXFLAGS 	:= $(shell $(LLVM_CONFIG) --cxxflags)
+LDFLAGS  := $(shell $(LLVM_CONFIG) --ldflags) -Wl,-rpath=$(LLVM_LIBDIR) -Wl,-rpath=$(LIBCPP_DIR)
+TSAN_FLAGS  := -fsanitize=thread -g -O1
 
 # ──────────────────────────────────────────────────────────────────
 # SOURCE FILES
@@ -15,15 +17,15 @@ PASS_NAME      := fasttrack-pass
 
 
 ESCAPE_PASS_SRC := escape_instrumentation.cpp 
-# TARGET_DIR     := targets/old_targets_dhruv
-TARGET_DIR     := ./targets/old_targets_dhruv
+TARGET_DIR     := targets/old_targets_dhruv
 
-RUNTIME_FT     := fasttrack_runtime.cpp
 # RUNTIME_FT     := fasttrack_runtime_unique.cpp
 # RUNTIME_SA     := fasttrack_runtime_with_sa_unique.cpp
+RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa_ver6.cpp
 TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
-# TARGET_SRC     := ./testing_temp_dir/src/sharing_patterns.cpp 
+# TARGET_SRC     := $(TARGET_DIR)/target_race.cpp
+# TARGET_SRC     := ./testing_temp_dir/src/test.cpp
 
 BUILD_DIR := build
 SA_TEST_SRC    := sa_correctness_test.cpp
@@ -152,7 +154,7 @@ $(BENCH_SA): $(TARGET_INST_BC) $(RUNTIME_SA_OBJ)
 # ──────────────────────────────────────────────────────────────────
 $(ESCAPE_PASS_OBJ): $(ESCAPE_PASS_SRC) | $(BUILD_DIR)
 	@echo "[6] Building Escape Analysis LLVM pass..."
-	$(CXX) -shared -fPIC $(LLVM_CXXFLAGS) $(LLVM_LDFLAGS) $< -o $@
+	$(CXX) -shared -fPIC $(CXXFLAGS) $(LDFLAGS) $< -o $@
 
 $(ESCAPE_IR): $(TARGET_BC) $(ESCAPE_PASS_OBJ)
 	@echo "[7] Instrumenting bitcode with Escape Analysis pass..."
@@ -201,6 +203,7 @@ run_sa_test: $(SA_TEST_EXEC)
 # RUN — execute all four variants and compare
 # ──────────────────────────────────────────────────────────────────
 run: $(BENCH_FT) $(BENCH_SA) $(ESCAPE_EXEC) $(ESCAPE_EXEC_SA)
+	@echo "Using LLVM from: $$(which clang++)"
 	@echo ""
 	@echo "====== Plain FastTrack ======"
 	./$(BENCH_FT) 2>&1 | tee $(OUT_FT)
