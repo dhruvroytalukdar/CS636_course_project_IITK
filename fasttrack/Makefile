@@ -34,9 +34,6 @@ TARGET_NAME := $(notdir $(basename $(TARGET_SRC)))
 TARGET_BC      := $(BUILD_DIR)/$(TARGET_NAME).bc
 TARGET_INST_BC := $(BUILD_DIR)/$(TARGET_NAME)_inst.bc
 TARGET_LL      := $(BUILD_DIR)/$(TARGET_NAME).ll
-# ──────────────────────────────────────────────────────────────────
-# BUILD DIRECTORY — all generated files live here
-# ──────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────
 # DERIVED PATHS  (all inside BUILD_DIR)
