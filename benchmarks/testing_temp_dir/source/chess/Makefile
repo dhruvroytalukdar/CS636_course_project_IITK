@@ -9,14 +9,14 @@ LLVM_LDFLAGS = $(shell llvm-config --ldflags)
 
 PASS_FLAGS = -fPIC -shared -O3
 
-PASS_DIR = ../../
-RUNTIME_SRC = $(PASS_DIR)runtime.cpp
+PASS_DIR = ../../../
+RUNTIME_SRC = $(PASS_DIR)fasttrack_runtime.cpp
 RUNTIME_OBJ = runtime.o
 
-BASE_PASS = $(PASS_DIR)base_pass.cpp
-TARGET_PASS = $(PASS_DIR)escape_pass_ver2.cpp 
+BASE_PASS = $(PASS_DIR)fasttrack_instrumentation.cpp
+TARGET_PASS = $(PASS_DIR)escape_instrumentation.cpp 
 
-BASE_PASS_CMD = base-pass
+BASE_PASS_CMD = fasttrack-pass
 TARGET_PASS_CMD = shared-ptr-analysis
 
 # ==========================================
@@ -111,11 +111,11 @@ target: $(BIN_TARGET)
 run: all
 	@for bin in $(BIN_BASE); do \
 		echo "=== Running $$bin ==="; \
-		$$bin; \
+		time $$bin; \
 	done
 	@for bin in $(BIN_TARGET); do \
 		echo "=== Running $$bin ==="; \
-		$$bin; \
+		time $$bin; \
 	done
 
 # ==========================================
@@ -128,7 +128,7 @@ $(TSAN_DIR)/%_tsan: $(SRC_DIR)/%.cpp
 tsan: dirs $(TSAN_BIN)
 	@for bin in $(TSAN_BIN); do \
 		echo "=== Running TSAN $$bin ==="; \
-		$$bin; \
+		time $$bin; \
 	done
 
 # ==========================================

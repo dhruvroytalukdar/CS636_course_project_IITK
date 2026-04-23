@@ -5,7 +5,7 @@
 #include <string.h>
 #include <time.h>
 
-#define NUM_THREADS     8
+#define NUM_THREADS     32
 #define SOLO_ITERS      10000
 #define SHARED_ITERS    10000
 

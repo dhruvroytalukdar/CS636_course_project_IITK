@@ -10,7 +10,8 @@
 #include <llvm/Passes/PassPlugin.h>
 #include <llvm/Support/raw_ostream.h>
 #include <map>
-
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 // tritd::set<std::string> StringPool;
 
 using namespace llvm;
@@ -19,6 +20,36 @@ namespace {
 
 struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
 
+std::string getRealVarName(Value *V) {
+    if (!V) return "unknown";
+
+    // 1. If the underlying object is an alloca, look for a dbg.declare intrinsic
+    if (auto *Alloca = dyn_cast<AllocaInst>(V)) {
+        for (User *U : Alloca->users()) {
+            if (auto *DbgDeclare = dyn_cast<DbgDeclareInst>(U)) {
+                if (DILocalVariable *DIVar = DbgDeclare->getVariable()) {
+                    return DIVar->getName().str();
+                }
+            }
+        }
+    }
+
+    // 2. If it's a global variable, the IR name is usually the source name
+    if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+        if (GV->hasName()) {
+            return GV->getName().str();
+        }
+    }
+
+    // 3. Fallback to standard IR value name
+    if (V->hasName()) {
+        return V->getName().str();
+    }
+
+    return "unknown";
+}
+
+// ...
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
         LLVMContext &Ctx = M.getContext();
         // const DataLayout &DL = M.getDataLayout();
@@ -72,11 +103,14 @@ struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
                         Value* Ptr = LI->getPointerOperand();
                         
                         // Extract Name
-                        Value *Base = getUnderlyingObject(Ptr);   
-                        std::string varName = "unknown";
-                        if (Base && Base->hasName()) {
-                            varName = Base->getName().str();
-                        }
+                        // Extract Name
+Value *Base = getUnderlyingObject(Ptr);
+std::string varName = getRealVarName(Base);
+                        // Value *Base = getUnderlyingObject(Ptr);   
+                        // std::string varName = "unknown";
+                        // if (Base && Base->hasName()) {
+                        //     varName = Base->getName().str();
+                        // }
 
                         // Create or reuse global string pointer
                         if (StringPool.find(varName) == StringPool.end()) {
@@ -102,11 +136,14 @@ struct FastTrackPass : public PassInfoMixin<FastTrackPass> {
                         Value* Ptr = SI->getPointerOperand();
 
                         // Extract Name
-                        Value *Base = getUnderlyingObject(Ptr);   
-                        std::string varName = "unknown";
-                        if (Base && Base->hasName()) {
-                            varName = Base->getName().str();
-                        }
+                        // Extract Name
+Value *Base = getUnderlyingObject(Ptr);   
+std::string varName = getRealVarName(Base);
+
+                        // std::string varName = "unknown";
+                        // if (Base && Base->hasName()) {
+                        //     varName = Base->getName().str();
+                        // }
 
                         // Create or reuse global string pointer
                         if (StringPool.find(varName) == StringPool.end()) {

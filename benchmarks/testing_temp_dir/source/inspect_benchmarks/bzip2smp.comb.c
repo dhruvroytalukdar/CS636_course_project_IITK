@@ -6199,7 +6199,7 @@ int main(int argc, char *argv[])
 
     /* Get an input chunk to place input data to */
     
-    pthread_mutex_lock( &inChunksMutex );
+    /* pthread_mutex_lock( &inChunksMutex ); */
     if ( !inChunksFree )
     {
       /* No input chunks currently available, wait for one to become free */
@@ -6210,7 +6210,7 @@ int main(int argc, char *argv[])
     who store to the head, it is safe */
     inChunks[ inChunksHead ] = strm;
 
-    pthread_mutex_unlock( &inChunksMutex );
+    /* pthread_mutex_unlock( &inChunksMutex ); */
 
     /* Init the compression */
     strm->bzalloc = NULL;
