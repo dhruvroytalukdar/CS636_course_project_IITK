@@ -24,7 +24,7 @@
 
 
 using namespace llvm;
-#define RUNTIME 2
+#define RUNTIME 1
 //3 = my ft.
 //2 - dhruv_Ft
 //1 wcp
@@ -551,11 +551,13 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
                                   VoidPtrTy, VoidPtrTy);
 
 #elif RUNTIME == 1
-    Type *VoidTy    = Type::getVoidTy(Ctx);
         Type *VoidPtrTy = PointerType::get(Type::getInt8Ty(Ctx), 0);
         Type *Int64Ty   = Type::getInt64Ty(Ctx);
+        Type *Int32Ty   = Type::getInt32Ty(Ctx);
         Type *Int8PtrTy = PointerType::getUnqual(Ctx);
 
+
+        std::map<std::string, Value*> StringPool;
         // ---- Runtime hooks ----
         FunctionCallee FtRead  =
             M.getOrInsertFunction("__wcp_read", VoidTy, VoidPtrTy, Int32Ty, VoidPtrTy);

@@ -61,7 +61,35 @@
 #include <ctime>
 
 // #define DEBUG
+// #define DEBUG
 
+struct RaceExample {
+    bool occurred = false;
+    int tid1 = 0;
+    int tid2 = 0;
+    int line_no = 0;
+    
+};
+
+struct VariableRaceSummary {
+    RaceExample wr;
+    RaceExample ww;
+    RaceExample rw;
+    char* var_name; 
+};
+// Heap-allocated mutex to survive C++ static destruction sequence
+std::mutex& get_race_summary_lock() {
+    static auto* mtx = new std::mutex();
+    return *mtx;
+}
+// Global lock for the summary map
+
+
+// Heap-allocated map to survive C++ static destruction sequence
+std::unordered_map<void*, VariableRaceSummary>& get_race_summary() {
+    static auto* instance = new std::unordered_map<void*, VariableRaceSummary>();
+    return *instance;
+}
 // =============================================================================
 // 1.  VECTOR-CLOCK TYPE AND HELPERS
 // =============================================================================
@@ -119,9 +147,6 @@ struct CSFrame {
 
 static std::recursive_mutex                          g_csframe_mtx;
 static std::unordered_map<int, std::vector<CSFrame>> g_csframes;
-
-static std::atomic<unsigned long long> slow_read_count{0};
-static std::atomic<unsigned long long> slow_write_count{0};
 
 // Push a new frame when a lock is acquired.
 static void csframe_push(int tid, void *lock_addr) {
@@ -299,10 +324,22 @@ static std::vector<int> other_tids(int exclude_tid) {
 // =============================================================================
 
 static void report_race(const char *type, void *addr,
-                        int tid1, int tid2, int line_no) {
+                        int tid1, int tid2, int line_no, char* var_name) {
     race_count.fetch_add(1, std::memory_order_relaxed);
                             
     #ifndef DEBUG
+            std::lock_guard<std::mutex> lock(get_race_summary_lock());
+        auto& summary = get_race_summary()[addr];
+        if(var_name != nullptr)summary.var_name = var_name;
+        // Record the first instance of each race type for this specific address
+        if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
+            summary.wr = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {
+            summary.ww = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "R-W") == 0 && !summary.rw.occurred) {
+            summary.rw = {true, tid1, tid2, line_no};
+        }
+
         // count unique races
     #else
         struct timespec ts;
@@ -315,6 +352,37 @@ static void report_race(const char *type, void *addr,
     #endif
 }
 
+__attribute__((destructor))
+void print_final_race_summary() {
+    std::lock_guard<std::mutex> lock(get_race_summary_lock());
+    auto& summary_map = get_race_summary();
+
+    if (summary_map.empty()) return;
+
+    printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
+    for (const auto& pair : summary_map) {
+        void* addr = pair.first;
+        const auto& summary = pair.second;
+        
+        printf("Variable ADDR: %p\n", addr);
+        printf("Variable Name: %s\n", summary.var_name);
+        
+        if (summary.ww.occurred) {
+            printf("  [W-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.ww.tid1, summary.ww.tid2, summary.ww.line_no);
+        }
+        if (summary.rw.occurred) {
+            printf("  [R-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.rw.tid1, summary.rw.tid2, summary.rw.line_no);
+        }
+        if (summary.wr.occurred) {
+            printf("  [W-R] Example: Thread %d and Thread %d at line %d\n",
+                   summary.wr.tid1, summary.wr.tid2, summary.wr.line_no);
+        }
+        printf("----------------------------------------------------------\n");
+    }
+    printf("==========================================================\n");
+}
 
 // =============================================================================
 // 7.  Acquire
@@ -441,17 +509,6 @@ void *thread_wrapper(void *raw_arg) {
     return fn(fn_arg);
 }
 
-__attribute__((destructor))
-void print_final_race_summary() {
-
-    printf("\n================ PERFORMANCE METRICS =====================\n");
-    printf("  Total WCP Read calls : %llu\n", slow_read_count.load());
-    printf("  Total WCP Write calls: %llu\n", slow_write_count.load());
-
-    printf("==========================================================\n");
-}
-
-
 void __wcp_thread_create(uint64_t /*child_id_raw*/) {
     // No-op: parent clock already incremented in __wcp_prepare_context.
 }
@@ -516,9 +573,7 @@ void __wcp_unlock(void *mutex_addr) {
 //   P_t := P_t ⊔ (⊔_{ℓ∈L} Lw[ℓ][x])
 //   if ¬(Wx ⊑ C_t) → W-R race
 //   Rx := Rx ⊔ C_t
-void __wcp_read(void *addr, int line_no) {
-    slow_read_count.fetch_add(1, std::memory_order_relaxed);
-
+void __wcp_read(void *addr, int line_no, char* var) {
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;
@@ -546,7 +601,7 @@ void __wcp_read(void *addr, int line_no) {
     // Race check: ¬(Wx ⊑ C_t)  →  W-R WCP-race
     if (!vc_leq(vs->Wx, Ct)) {
         int other = first_violating_tid(vs->Wx, Ct);
-        report_race("W-R", addr, other, t->tid, line_no);
+        report_race("W-R", addr, other, t->tid, line_no, var);
     }
 
     // Rx := Rx ⊔ C_t
@@ -559,8 +614,7 @@ void __wcp_read(void *addr, int line_no) {
 //   if ¬(Rx ⊑ C_t)  → R-W race
 //   if ¬(Wx ⊑ C_t)  → W-W race
 //   Wx := Wx ⊔ C_t
-void __wcp_write(void *addr, int line_no) {
-    slow_write_count.fetch_add(1, std::memory_order_relaxed);
+void __wcp_write(void *addr, int line_no, char* var) {
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;
@@ -589,13 +643,13 @@ void __wcp_write(void *addr, int line_no) {
     // Race check: ¬(Rx ⊑ C_t)  →  R-W WCP-race
     if (!vc_leq(vs->Rx, Ct)) {
         int other = first_violating_tid(vs->Rx, Ct);
-        report_race("R-W", addr, other, t->tid, line_no);
+        report_race("R-W", addr, other, t->tid, line_no, var);
     }
 
     // Race check: ¬(Wx ⊑ C_t)  →  W-W WCP-race
     if (!vc_leq(vs->Wx, Ct)) {
         int other = first_violating_tid(vs->Wx, Ct);
-        report_race("W-W", addr, other, t->tid, line_no);
+        report_race("W-W", addr, other, t->tid, line_no, var);
     }
 
     // Wx := Wx ⊔ C_t
