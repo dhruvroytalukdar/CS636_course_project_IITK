@@ -2,8 +2,8 @@
 #include <stdio.h>
 
 #define CHUNK_SIZE 1024
-#define ITERATIONS 100000
-#define NUM_THREADS 4
+#define ITERATIONS 10000
+#define NUM_THREADS 8
 
 int private_chunks[NUM_THREADS * CHUNK_SIZE];
 

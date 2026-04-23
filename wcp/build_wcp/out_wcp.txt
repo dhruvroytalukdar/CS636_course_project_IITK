@@ -1,6 +1,6 @@
-Fast path test complete.
+[TEST1] Done. shared_vars[0]=1999
 
 ================ PERFORMANCE METRICS =====================
-  Total WCP Read calls : 212000050
-  Total WCP Write calls: 88000027
+  Total WCP Read calls : 7240055
+  Total WCP Write calls: 3232027
 ==========================================================

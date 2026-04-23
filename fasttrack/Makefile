@@ -21,7 +21,8 @@ TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
 
-TARGET_SRC     := $(TARGET_DIR)/test1.cpp
+# TARGET_SRC     := $(TARGET_DIR)/test1.cpp
+TARGET_SRC     := $(TARGET_DIR)/test2.cpp
 # TARGET_SRC     := $(TARGET_DIR)/target_race.cpp
 # TARGET_SRC     := ./testing_temp_dir/src/test.cpp
 
@@ -308,7 +309,7 @@ help:
 # CLEAN
 # ──────────────────────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) *.txt
 
 .PHONY: all run debug clean help \
         bench_tsan target_ir compare \

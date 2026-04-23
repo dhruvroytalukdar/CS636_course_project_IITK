@@ -22,7 +22,7 @@ RUNTIME_WCP_SA  := wcp_runtime_with_sa.cpp
 # TARGET_DIR     := ./benchmarks/targets/old_targets_dhruv
 TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
 # TARGET_SRC      := ./testing_temp_dir/src/test.cpp
-TARGET_SRC    := $(TARGET_DIR)/test2.cpp
+TARGET_SRC    := $(TARGET_DIR)/test1.cpp
 
 BUILD_DIR       := build_wcp
 TARGET_NAME     := $(notdir $(basename $(TARGET_SRC)))
