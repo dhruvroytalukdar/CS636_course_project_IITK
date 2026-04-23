@@ -256,10 +256,10 @@ void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, 
     race_count.fetch_add(1, std::memory_order_relaxed);
     
     #ifndef DEBUG
-        std::lock_guard<std::mutex> lock(get_race_summary_lock());
-        auto& summary = get_race_summary()[addr];
-        if(var_name != nullptr)summary.var_name = var_name;
-        // Record the first instance of each race type for this specific address
+    std::lock_guard<std::mutex> lock(get_race_summary_lock());
+    auto& summary = get_race_summary()[addr];
+    if(var_name != nullptr)summary.var_name = var_name;
+    // Record the first instance of each race type for this specific address
         if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
             summary.wr = {true, tid1, tid2, line_no};
         } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {
@@ -267,7 +267,8 @@ void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, 
         } else if (strcmp(type, "R-W") == 0 && !summary.rw.occurred) {
             summary.rw = {true, tid1, tid2, line_no};
         }
-    #else
+
+#else
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
@@ -275,6 +276,7 @@ void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, 
         type, addr, tid1, tid2, line_no, (unsigned long long)ns);
     #endif
 }
+
 __attribute__((destructor))
 void print_final_race_summary() {
     std::lock_guard<std::mutex> lock(get_race_summary_lock());

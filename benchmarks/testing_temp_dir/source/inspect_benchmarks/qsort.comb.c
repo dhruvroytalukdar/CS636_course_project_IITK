@@ -618,14 +618,13 @@ int main(void)
     int hour, min;
     float sec;
     struct timeval start, stop;
-
-
+   
     for(ii = 0; ii < SIZE; ii++)
     {
         orig_array[ii] = mrand48();
         sort_array[ii] = orig_array[ii];
     }
-
+    
     if(gettimeofday(&start, NULL) != 0)
     {
         fprintf(stderr, "%s: %d: gettimeofday() ERROR: %s\n",

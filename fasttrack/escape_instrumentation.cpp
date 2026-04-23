@@ -583,8 +583,8 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
                                   VoidPtrTy, VoidPtrTy);
 #endif
         // ---- Stats ----
-        unsigned long InstrLoads  = 0, SkipLoads  = 0;
-        unsigned long InstrStores = 0, SkipStores = 0;
+        unsigned long InstrLoads  = 0, SkipLoads  = 0, total_loads = 0;
+        unsigned long InstrStores = 0, SkipStores = 0, total_stores = 0;
         bool Modified = false;
 
         for (Function &F : M.functions()) {
@@ -606,12 +606,14 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
                 for (Instruction &I : BB) {
 
                     if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                        total_loads++;
                         if (EA.mustInstrument(LI->getPointerOperand()))
                             Loads.push_back(LI);
                         else
                             ++SkipLoads;
 
                     } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                        total_stores++;
                         if (EA.mustInstrument(SI->getPointerOperand()))
                             Stores.push_back(SI);
                         else
@@ -833,11 +835,17 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
 
         }
             // ---- Print stats ----
-        errs() << "num_loads  instrumented=" << InstrLoads
+        errs() << "======================================================\n";
+        errs() << "======================================================\n";
+        errs() << "total loads= " << total_loads
+                 << "num_loads instrumented=" << InstrLoads
                << "  skipped(thread-local)=" << SkipLoads  << "\n";
-        errs() << "num_stores instrumented=" << InstrStores
-               << "  skipped(thread-local)=" << SkipStores << "\n";
+        errs() << "total stores= " << total_stores 
+             << "num_stores instrumented= " << InstrStores
+               << "  skipped(thread-local)= " << SkipStores << "\n";
 
+        errs() << "======================================================\n";
+        errs() << "======================================================\n";
         return Modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
     
     }
