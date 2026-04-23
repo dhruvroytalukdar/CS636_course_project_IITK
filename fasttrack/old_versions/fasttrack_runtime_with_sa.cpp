@@ -12,35 +12,6 @@
 #define SHADOW_SIZE  (1 << 20)
 #define SHADOW_MASK  (SHADOW_SIZE - 1)
 
-#include <cstring> // Required for strcmp
-
-// #define DEBUG
-
-struct RaceExample {
-    bool occurred = false;
-    int tid1 = 0;
-    int tid2 = 0;
-    int line_no = 0;
-};
-
-struct VariableRaceSummary {
-    RaceExample wr;
-    RaceExample ww;
-    RaceExample rw;
-    char* var_name;
-};
-
-// Global lock for the summary map
-std::mutex& get_race_summary_lock() {
-    static std::mutex mtx;
-    return mtx;
-}
-
-// Heap-allocated map to survive C++ static destruction sequence
-std::unordered_map<void*, VariableRaceSummary>& get_race_summary() {
-    static auto* instance = new std::unordered_map<void*, VariableRaceSummary>();
-    return *instance;
-}
 // Encapsulates TID+Clock in a single variable
 typedef unsigned long long Epoch;
 
@@ -167,7 +138,6 @@ static ShadowEntry      shadow_table[SHADOW_SIZE];
 static thread_local ThreadState* tl_thread_state = nullptr;
 static thread_local bool in_ft_runtime = false;
 
-
 static std::recursive_mutex& get_thread_map_lock() {
     static auto* m = new std::recursive_mutex(); return *m;
 }
@@ -252,68 +222,15 @@ static LockState* get_lock_state(void* addr) {
     if (!sl.count(addr)) sl[addr] = new LockState();
     return sl[addr];
 }
-void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, char* var_name) {
+
+static void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
     race_count.fetch_add(1, std::memory_order_relaxed);
-    
-    std::lock_guard<std::mutex> lock(get_race_summary_lock());
-    auto& summary = get_race_summary()[addr];
-    if(var_name != nullptr)summary.var_name = var_name;
-    // Record the first instance of each race type for this specific address
-    #ifndef DEBUG
-        if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
-            summary.wr = {true, tid1, tid2, line_no};
-        } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {
-            summary.ww = {true, tid1, tid2, line_no};
-        } else if (strcmp(type, "R-W") == 0 && !summary.rw.occurred) {
-            summary.rw = {true, tid1, tid2, line_no};
-        }
-    #else
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-        printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
-        type, addr, tid1, tid2, line_no, (unsigned long long)ns);
-    #endif
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
+           type, addr, tid1, tid2, line_no, (unsigned long long)ns);
 }
-__attribute__((destructor))
-void print_final_race_summary() {
-    std::lock_guard<std::mutex> lock(get_race_summary_lock());
-    auto& summary_map = get_race_summary();
-
-    if (summary_map.empty()) return;
-
-    printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
-    for (const auto& pair : summary_map) {
-        void* addr = pair.first;
-        const auto& summary = pair.second;
-
-        printf("Variable ADDR: %p\n", addr);
-        printf("Variable Name: %s\n", summary.var_name);
-
-        if (summary.ww.occurred) {
-            printf("  [W-W] Example: Thread %d and Thread %d at line %d\n",
-                   summary.ww.tid1, summary.ww.tid2, summary.ww.line_no);
-        }
-        if (summary.rw.occurred) {
-            printf("  [R-W] Example: Thread %d and Thread %d at line %d\n",
-                   summary.rw.tid1, summary.rw.tid2, summary.rw.line_no);
-        }
-        if (summary.wr.occurred) {
-            printf("  [W-R] Example: Thread %d and Thread %d at line %d\n",
-                   summary.wr.tid1, summary.wr.tid2, summary.wr.line_no);
-        }
-        printf("----------------------------------------------------------\n");
-    }
-    printf("==========================================================\n");
-}
-// static void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
-//     race_count.fetch_add(1, std::memory_order_relaxed);
-//     struct timespec ts;
-//     clock_gettime(CLOCK_MONOTONIC, &ts);
-//     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-//     printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
-//            type, addr, tid1, tid2, line_no, (unsigned long long)ns);
-// }
 
 // ──────────────────────────────────────────────────────────────────
 // RECLAIM CHECK
@@ -352,7 +269,7 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 // FT CORE
 // ──────────────────────────────────────────────────────────────────
 // Called holding a lock over x and t so we can use relaxed mode
-static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t, char* var_name) {
+static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     Epoch R = x->R.load(std::memory_order_relaxed);
     if (R == t->epoch) return false;
 
@@ -361,7 +278,7 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t, c
     int   w_clock = get_clock(W);
     bool raced = false;
     if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-R", addr, w_tid, t->tid, line_no, var_name);
+        report_race("W-R", addr, w_tid, t->tid, line_no);
         // Remove the previous write history
         x->W.store(0,        std::memory_order_relaxed);
         raced = true;
@@ -386,7 +303,7 @@ static bool ft_read_core(void* addr, int line_no, VarState* x, ThreadState* t, c
     return raced;
 }
 
-static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, char* var_name) {
+static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t) {
     Epoch W = x->W.load(std::memory_order_relaxed);
     if (W == t->epoch) return false;
 
@@ -394,7 +311,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, 
     int  w_tid   = get_tid(W);
     int  w_clock = get_clock(W);
     if (w_clock > t->get_clock_of(w_tid)) {
-        report_race("W-W", addr, w_tid, t->tid, line_no, var_name);
+        report_race("W-W", addr, w_tid, t->tid, line_no);
         raced = true;
     }
 
@@ -404,7 +321,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, 
             int r_tid   = get_tid(R);
             int r_clock = get_clock(R);
             if (r_clock > t->get_clock_of(r_tid)) {
-                report_race("R-W", addr, r_tid, t->tid, line_no, var_name);
+                report_race("R-W", addr, r_tid, t->tid, line_no);
                 raced = true;
             }
         }
@@ -412,7 +329,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, 
         for (int i = 0; i < (int)x->Rvc.size(); ++i) {
             if (x->Rvc[i] == 0) continue;
             if (get_clock(x->Rvc[i]) > t->get_clock_of(i)) {
-                report_race("R-W", addr, i, t->tid, line_no, var_name);
+                report_race("R-W", addr, i, t->tid, line_no);
                 raced = true;
             }
         }
@@ -434,7 +351,7 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, 
 // failure without duplicating the entire switch.
 // ──────────────────────────────────────────────────────────────────
 
-static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
+static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -478,7 +395,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = ft_read_core(addr, line_no, x, t, var_name);
+                bool raced = ft_read_core(addr, line_no, x, t);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_epoch.store(
                         x->W.load(std::memory_order_relaxed),
@@ -492,7 +409,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
             return;
 
         case ShareState::SHARED: {
-            bool raced = ft_read_core(addr, line_no, x, t, var_name);
+            bool raced = ft_read_core(addr, line_no, x, t);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_epoch.store(
                     x->W.load(std::memory_order_relaxed),
@@ -507,7 +424,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
     }
 }
 
-static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
+static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* t) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -544,7 +461,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = ft_write_core(addr, line_no, x, t, var_name);
+                bool raced = ft_write_core(addr, line_no, x, t);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_epoch.store(t->epoch, std::memory_order_relaxed);
                     x->owner_read_epoch.store(0,         std::memory_order_relaxed);
@@ -557,7 +474,7 @@ static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* 
             return;
 
         case ShareState::SHARED: {
-            bool raced = ft_write_core(addr, line_no, x, t, var_name);
+            bool raced = ft_write_core(addr, line_no, x, t);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_epoch.store(t->epoch, std::memory_order_relaxed);
                 x->owner_read_epoch.store(0,         std::memory_order_relaxed);
@@ -589,7 +506,7 @@ extern "C" {
 //      • failure → another thread changed hot_word (stole ownership).
 //        Fall through to slow path to re-examine under var_lk.
 
-void __ft_read(void* addr, int line_no, char* var_name) {
+void __ft_read(void* addr, int line_no) {
     if (in_ft_runtime) return;
     struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
     in_ft_runtime = true;
@@ -627,7 +544,7 @@ void __ft_read(void* addr, int line_no, char* var_name) {
         }
     }
 
-    ft_slow_read(addr, line_no, e, t, var_name);
+    ft_slow_read(addr, line_no, e, t);
 }
 
 // ── __ft_write ──────────────────────────────────────────────────
@@ -640,7 +557,7 @@ void __ft_read(void* addr, int line_no, char* var_name) {
 //      • success → Return.
 //      • failure → fall to slow path.
 
-void __ft_write(void* addr, int line_no, char* var_name) {
+void __ft_write(void* addr, int line_no) {
     if (in_ft_runtime) return;
     struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
     in_ft_runtime = true;
@@ -670,7 +587,7 @@ void __ft_write(void* addr, int line_no, char* var_name) {
         }
     }
 
-    ft_slow_write(addr, line_no, e, t, var_name);
+    ft_slow_write(addr, line_no, e, t);
 }
 
 // ──────────────────────────────────────────────────────────────────

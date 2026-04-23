@@ -7,7 +7,36 @@
 #define SHADOW_SIZE  (1 << 20)
 #define SHADOW_MASK  (SHADOW_SIZE - 1)
 
+#include <cstring> // Required for strcmp
 
+// #define DEBUG
+
+struct RaceExample {
+    bool occurred = false;
+    int tid1 = 0;
+    int tid2 = 0;
+    int line_no = 0;
+    
+};
+
+struct VariableRaceSummary {
+    RaceExample wr;
+    RaceExample ww;
+    RaceExample rw;
+    char* var_name; 
+};
+
+// Global lock for the summary map
+std::mutex& get_race_summary_lock() {
+    static std::mutex mtx;
+    return mtx;
+}
+
+// Heap-allocated map to survive C++ static destruction sequence
+std::unordered_map<void*, VariableRaceSummary>& get_race_summary() {
+    static auto* instance = new std::unordered_map<void*, VariableRaceSummary>();
+    return *instance;
+}
 typedef unsigned long long Epoch;
 
 const Epoch READ_SHARED = (Epoch)-1;
@@ -90,7 +119,6 @@ static ShadowEntry shadow_table[SHADOW_SIZE];
 
 static thread_local ThreadState* tl_thread_state = nullptr;
 static thread_local bool in_ft_runtime = false;
-
 
 // Thread Registry Accessors
 std::recursive_mutex& get_thread_map_lock() {
@@ -188,19 +216,72 @@ LockState* get_lock_state(void* mutex_addr) {
 //     printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d \n", type, addr, tid1, tid2);
 //     printf("    IR INST: %s\n", inst_str);
 // }
-
-
-void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
+void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, char* var_name) {
     race_count.fetch_add(1, std::memory_order_relaxed);
     
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-    
-    // Print the line number cleanly!
-    printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
-           type, addr, tid1, tid2, line_no, (unsigned long long)ns);
+    std::lock_guard<std::mutex> lock(get_race_summary_lock());
+    auto& summary = get_race_summary()[addr];
+    if(var_name != nullptr)summary.var_name = var_name;
+    // Record the first instance of each race type for this specific address
+    #ifndef DEBUG
+        if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
+            summary.wr = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {
+            summary.ww = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "R-W") == 0 && !summary.rw.occurred) {
+            summary.rw = {true, tid1, tid2, line_no};
+        }
+    #else
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
+        type, addr, tid1, tid2, line_no, (unsigned long long)ns);
+    #endif
 }
+__attribute__((destructor))
+void print_final_race_summary() {
+    std::lock_guard<std::mutex> lock(get_race_summary_lock());
+    auto& summary_map = get_race_summary();
+
+    if (summary_map.empty()) return;
+
+    printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
+    for (const auto& pair : summary_map) {
+        void* addr = pair.first;
+        const auto& summary = pair.second;
+        
+        printf("Variable ADDR: %p\n", addr);
+        printf("Variable Name: %s\n", summary.var_name);
+        
+        if (summary.ww.occurred) {
+            printf("  [W-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.ww.tid1, summary.ww.tid2, summary.ww.line_no);
+        }
+        if (summary.rw.occurred) {
+            printf("  [R-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.rw.tid1, summary.rw.tid2, summary.rw.line_no);
+        }
+        if (summary.wr.occurred) {
+            printf("  [W-R] Example: Thread %d and Thread %d at line %d\n",
+                   summary.wr.tid1, summary.wr.tid2, summary.wr.line_no);
+        }
+        printf("----------------------------------------------------------\n");
+    }
+    printf("==========================================================\n");
+}
+
+// void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
+//     race_count.fetch_add(1, std::memory_order_relaxed);
+    
+//     struct timespec ts;
+//     clock_gettime(CLOCK_MONOTONIC, &ts);
+//     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    
+//     // Print the line number cleanly!
+//     printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
+//            type, addr, tid1, tid2, line_no, (unsigned long long)ns);
+// }
 
 
 // ------------------------------------------------------------
@@ -363,7 +444,7 @@ extern "C" {
     // ------------------------------------------------------------
     // MEMORY EVENTS
     // ------------------------------------------------------------
-    void __ft_read(void* addr, int line_no) {
+    void __ft_read(void* addr, int line_no, char* var_name) {
         if (in_ft_runtime) return;
         struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
         in_ft_runtime = true;
@@ -387,7 +468,7 @@ extern "C" {
         int w_tid = get_tid(x->W);
         int w_clock = get_clock(x->W);
         if (w_clock > t->get_clock_of(w_tid)) {
-            report_race("W-R", addr, w_tid, t->tid, line_no);
+            report_race("W-R", addr, w_tid, t->tid, line_no, var_name);
             x->W = 0;
         }
 
@@ -419,11 +500,10 @@ extern "C" {
         }
     }
 
-    void __ft_write(void* addr, int line_no) {
+    void __ft_write(void* addr, int line_no, char* var_name) {
         if (in_ft_runtime) return;
         struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
         in_ft_runtime = true;
-
         ThreadState* t = get_current_thread();
         VarState* x = get_var_state(addr);
 
@@ -438,7 +518,7 @@ extern "C" {
         int w_tid = get_tid(x->W);
         int w_clock = get_clock(x->W);
         if (w_clock > t->get_clock_of(w_tid)) {
-            report_race("W-W", addr, w_tid, t->tid, line_no);
+            report_race("W-W", addr, w_tid, t->tid, line_no, var_name);
         }
 
         // 3. Read-Write Race Check
@@ -449,7 +529,7 @@ extern "C" {
                 int r_tid = get_tid(x->R);
                 int r_clock = get_clock(x->R);
                 if (r_clock > t->get_clock_of(r_tid)) {
-                    report_race("R-W", addr, r_tid, t->tid, line_no);
+                    report_race("R-W", addr, r_tid, t->tid, line_no, var_name);
                 }
             }
         } else {
@@ -459,7 +539,7 @@ extern "C" {
                 if (x->Rvc[i] == 0) continue;
                 int u_clock = get_clock(x->Rvc[i]);
                 if (u_clock > t->get_clock_of(i)) {
-                    report_race("R-W", addr, i, t->tid, line_no);
+                    report_race("R-W", addr, i, t->tid, line_no, var_name);
                 }
             }
         }

@@ -19,10 +19,8 @@ PASS_NAME      := fasttrack-pass
 ESCAPE_PASS_SRC := escape_instrumentation.cpp 
 TARGET_DIR     := targets/old_targets_dhruv
 
-# RUNTIME_FT     := fasttrack_runtime_unique.cpp
-# RUNTIME_SA     := fasttrack_runtime_with_sa_unique.cpp
 RUNTIME_FT     := fasttrack_runtime.cpp
-RUNTIME_SA     := fasttrack_runtime_with_sa_ver6.cpp
+RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
 TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
 # TARGET_SRC     := $(TARGET_DIR)/target_race.cpp
 # TARGET_SRC     := ./testing_temp_dir/src/test.cpp
