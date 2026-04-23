@@ -1,11 +1,19 @@
 ; ModuleID = 'build_wcp/test1.bc'
 source_filename = "../benchmarks/targets/new_claude_benchmarks/test1.cpp"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+<<<<<<< HEAD
 target triple = "x86_64-unknown-linux-gnu"
 
 %struct.WorkArg = type { i32 }
 
 @_ZL11shared_vars = internal global [100 x i32] zeroinitializer, align 16, !dbg !0
+=======
+target triple = "x86_64-pc-linux-gnu"
+
+%struct.WorkArg = type { i32 }
+
+@_ZL11shared_vars = internal global [500 x i32] zeroinitializer, align 16, !dbg !0
+>>>>>>> c215f59 (wcp unique version integrated)
 @.str = private unnamed_addr constant [33 x i8] c"[TEST1] Done. shared_vars[0]=%d\0A\00", align 1, !dbg !11
 @0 = private unnamed_addr constant [8 x i8] c"unknown\00", align 1
 @1 = private unnamed_addr constant [17 x i8] c"_ZL11shared_vars\00", align 1
@@ -18,7 +26,11 @@ define dso_local noundef i32 @main() #0 !dbg !29 {
   %4 = alloca i32, align 4
   %5 = alloca i32, align 4
   store i32 0, ptr %1, align 4
+<<<<<<< HEAD
   %6 = call ptr @memset(ptr noundef @_ZL11shared_vars, i32 noundef 0, i64 noundef 400) #4, !dbg !33
+=======
+  %6 = call ptr @memset(ptr noundef @_ZL11shared_vars, i32 noundef 0, i64 noundef 2000) #4, !dbg !33
+>>>>>>> c215f59 (wcp unique version integrated)
     #dbg_declare(ptr %2, !34, !DIExpression(), !41)
     #dbg_declare(ptr %3, !42, !DIExpression(), !44)
     #dbg_declare(ptr %4, !45, !DIExpression(), !47)
@@ -124,14 +136,22 @@ define internal noundef ptr @_ZL6workerPv(ptr noundef %0) #2 !dbg !88 {
 
 13:                                               ; preds = %21, %12
   %14 = load i32, ptr %5, align 4, !dbg !110
+<<<<<<< HEAD
   %15 = icmp slt i32 %14, 100, !dbg !112
+=======
+  %15 = icmp slt i32 %14, 500, !dbg !112
+>>>>>>> c215f59 (wcp unique version integrated)
   br i1 %15, label %16, label %24, !dbg !113
 
 16:                                               ; preds = %13
   %17 = load i32, ptr %4, align 4, !dbg !114
   %18 = load i32, ptr %5, align 4, !dbg !115
   %19 = sext i32 %18 to i64, !dbg !116
+<<<<<<< HEAD
   %20 = getelementptr inbounds [100 x i32], ptr @_ZL11shared_vars, i64 0, i64 %19, !dbg !116
+=======
+  %20 = getelementptr inbounds [500 x i32], ptr @_ZL11shared_vars, i64 0, i64 %19, !dbg !116
+>>>>>>> c215f59 (wcp unique version integrated)
   call void @__wcp_write(ptr %20, i32 46, ptr @1), !dbg !117
   store i32 %17, ptr %20, align 4, !dbg !117
   br label %21, !dbg !116
@@ -151,13 +171,21 @@ define internal noundef ptr @_ZL6workerPv(ptr noundef %0) #2 !dbg !88 {
 
 25:                                               ; preds = %35, %24
   %26 = load i32, ptr %7, align 4, !dbg !129
+<<<<<<< HEAD
   %27 = icmp slt i32 %26, 100, !dbg !131
+=======
+  %27 = icmp slt i32 %26, 500, !dbg !131
+>>>>>>> c215f59 (wcp unique version integrated)
   br i1 %27, label %28, label %38, !dbg !132
 
 28:                                               ; preds = %25
   %29 = load i32, ptr %7, align 4, !dbg !133
   %30 = sext i32 %29 to i64, !dbg !134
+<<<<<<< HEAD
   %31 = getelementptr inbounds [100 x i32], ptr @_ZL11shared_vars, i64 0, i64 %30, !dbg !134
+=======
+  %31 = getelementptr inbounds [500 x i32], ptr @_ZL11shared_vars, i64 0, i64 %30, !dbg !134
+>>>>>>> c215f59 (wcp unique version integrated)
   call void @__wcp_read(ptr %31, i32 51, ptr @1), !dbg !134
   %32 = load i32, ptr %31, align 4, !dbg !134
   %33 = load volatile i32, ptr %6, align 4, !dbg !135
@@ -218,8 +246,13 @@ attributes #5 = { nobuiltin "no-builtins" }
 
 !0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
 !1 = distinct !DIGlobalVariable(name: "shared_vars", linkageName: "_ZL11shared_vars", scope: !2, file: !3, line: 33, type: !18, isLocal: true, isDefinition: true)
+<<<<<<< HEAD
 !2 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !3, producer: "clang version 20.1.8 (https://github.com/llvm/llvm-project 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, retainedTypes: !4, globals: !10, splitDebugInlining: false, nameTableKind: None)
 !3 = !DIFile(filename: "../benchmarks/targets/new_claude_benchmarks/test1.cpp", directory: "/mnt/c/Users/dhruv/Desktop/IIT-Kanpur/Sem 2/CS636/course_project/CS636_course_project_IITK/wcp", checksumkind: CSK_MD5, checksum: "7972819d48c5dce2b99bf70baf0e5dbb")
+=======
+!2 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !3, producer: "Ubuntu clang version 20.1.8 (0ubuntu4)", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, retainedTypes: !4, globals: !10, splitDebugInlining: false, nameTableKind: None)
+!3 = !DIFile(filename: "../benchmarks/targets/new_claude_benchmarks/test1.cpp", directory: "/home/rahulm/work/cs636/CS636_course_project_IITK/wcp", checksumkind: CSK_MD5, checksum: "26d491393da935e7e92afdd31b843b19")
+>>>>>>> c215f59 (wcp unique version integrated)
 !4 = !{!5}
 !5 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !6, size: 64)
 !6 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "WorkArg", file: !3, line: 36, size: 32, flags: DIFlagTypePassByValue, elements: !7, identifier: "_ZTS7WorkArg")
@@ -234,9 +267,15 @@ attributes #5 = { nobuiltin "no-builtins" }
 !15 = !DIBasicType(name: "char", size: 8, encoding: DW_ATE_signed_char)
 !16 = !{!17}
 !17 = !DISubrange(count: 33)
+<<<<<<< HEAD
 !18 = !DICompositeType(tag: DW_TAG_array_type, baseType: !9, size: 3200, elements: !19)
 !19 = !{!20}
 !20 = !DISubrange(count: 100)
+=======
+!18 = !DICompositeType(tag: DW_TAG_array_type, baseType: !9, size: 16000, elements: !19)
+!19 = !{!20}
+!20 = !DISubrange(count: 500)
+>>>>>>> c215f59 (wcp unique version integrated)
 !21 = !{i32 7, !"Dwarf Version", i32 5}
 !22 = !{i32 2, !"Debug Info Version", i32 3}
 !23 = !{i32 1, !"wchar_size", i32 4}
@@ -244,7 +283,11 @@ attributes #5 = { nobuiltin "no-builtins" }
 !25 = !{i32 7, !"PIE Level", i32 2}
 !26 = !{i32 7, !"uwtable", i32 2}
 !27 = !{i32 7, !"frame-pointer", i32 2}
+<<<<<<< HEAD
 !28 = !{!"clang version 20.1.8 (https://github.com/llvm/llvm-project 87f0227cb60147a26a1eeb4fb06e3b505e9c7261)"}
+=======
+!28 = !{!"Ubuntu clang version 20.1.8 (0ubuntu4)"}
+>>>>>>> c215f59 (wcp unique version integrated)
 !29 = distinct !DISubprogram(name: "main", scope: !3, file: !3, line: 57, type: !30, scopeLine: 57, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !32)
 !30 = !DISubroutineType(types: !31)
 !31 = !{!9}
@@ -253,7 +296,11 @@ attributes #5 = { nobuiltin "no-builtins" }
 !34 = !DILocalVariable(name: "threads", scope: !29, file: !3, line: 60, type: !35)
 !35 = !DICompositeType(tag: DW_TAG_array_type, baseType: !36, size: 256, elements: !39)
 !36 = !DIDerivedType(tag: DW_TAG_typedef, name: "pthread_t", file: !37, line: 27, baseType: !38)
+<<<<<<< HEAD
 !37 = !DIFile(filename: "/usr/include/x86_64-linux-gnu/bits/pthreadtypes.h", directory: "", checksumkind: CSK_MD5, checksum: "8a5acdbeec491eca11cf81cb1ef77ea7")
+=======
+!37 = !DIFile(filename: "/usr/include/x86_64-linux-gnu/bits/pthreadtypes.h", directory: "", checksumkind: CSK_MD5, checksum: "8e06fe5d0f3f3d4ee6a7a8929dd2b809")
+>>>>>>> c215f59 (wcp unique version integrated)
 !38 = !DIBasicType(name: "unsigned long", size: 64, encoding: DW_ATE_unsigned)
 !39 = !{!40}
 !40 = !DISubrange(count: 4)

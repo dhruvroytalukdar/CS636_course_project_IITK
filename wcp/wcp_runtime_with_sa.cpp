@@ -51,7 +51,35 @@
 #include <time.h>
 
 // #define DEBUG
+// #define DEBUG
 
+struct RaceExample {
+    bool occurred = false;
+    int tid1 = 0;
+    int tid2 = 0;
+    int line_no = 0;
+    
+};
+
+struct VariableRaceSummary {
+    RaceExample wr;
+    RaceExample ww;
+    RaceExample rw;
+    char* var_name; 
+};
+
+// Global lock for the summary map
+// Heap-allocated mutex to survive C++ static destruction sequence
+std::mutex& get_race_summary_lock() {
+    static auto* mtx = new std::mutex();
+    return *mtx;
+}
+
+// Heap-allocated map to survive C++ static destruction sequence
+std::unordered_map<void*, VariableRaceSummary>& get_race_summary() {
+    static auto* instance = new std::unordered_map<void*, VariableRaceSummary>();
+    return *instance;
+}
 // =============================================================================
 // SECTION 1 — SHARING ANALYSIS LAYER  (unchanged from FT+SA)
 // =============================================================================
@@ -223,9 +251,6 @@ struct CSFrame {
 static std::recursive_mutex                          g_csframe_mtx;
 static std::unordered_map<int, std::vector<CSFrame>> g_csframes;
 
-static std::atomic<unsigned long long> slow_read_count{0};
-static std::atomic<unsigned long long> slow_write_count{0};
-
 static void csframe_push(int tid, void *lock_addr) {
     std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
     g_csframes[tid].push_back({lock_addr, {}, {}});
@@ -364,22 +389,30 @@ static std::vector<int> other_tids(int exclude_tid) {
 // =============================================================================
 // SECTION 7 — RACE REPORTING
 // =============================================================================
-
-static void report_race(const char* type, void* addr,
-                        int tid1, int tid2, int line_no) {
+void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, char* var_name) {
     race_count.fetch_add(1, std::memory_order_relaxed);
-
+    
     #ifndef DEBUG
-        // count unique races
-    #else
+        std::lock_guard<std::mutex> lock(get_race_summary_lock());
+        auto& summary = get_race_summary()[addr];
+        if(var_name != nullptr)summary.var_name = var_name;
+        // Record the first instance of each race type for this specific address
+        if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
+            summary.wr = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {
+            summary.ww = {true, tid1, tid2, line_no};
+        } else if (strcmp(type, "R-W") == 0 && !summary.rw.occurred) {
+            summary.rw = {true, tid1, tid2, line_no};
+        }
+#else
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-        printf("[WCP+SA LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d "
-            "| LINE: %d | TS_NS: %llu\n",
-            type, addr, tid1, tid2, line_no, (unsigned long long)ns);
+        printf("[FASTTRACK LOG] | TYPE: %s | ADDR: %p | THREADS: %d-%d | LINE: %d | TS_NS: %llu\n",
+        type, addr, tid1, tid2, line_no, (unsigned long long)ns);
     #endif
 }
+
 
 // =============================================================================
 // SECTION 8 — WCP CORE: ACQUIRE / RELEASE
@@ -460,7 +493,7 @@ static void do_release(ThreadState* t, LockState* ls, void* lock_addr) {
 //
 // Returns true if a race was detected (used by can_reclaim guard in SA layer).
 static bool wcp_read_core(void* addr, int line_no,
-                          VarState* x, ThreadState* t) {
+                          VarState* x, ThreadState* t, char* var) {
     uintptr_t xaddr = (uintptr_t)addr;
 
     // Record access in CS frames (for Lr update at release, line 7).
@@ -481,7 +514,7 @@ static bool wcp_read_core(void* addr, int line_no,
     bool raced = false;
     if (!vc_leq(x->Wx, Ct)) {
         int other = first_violating_tid(x->Wx, Ct);
-        report_race("W-R", addr, other, t->tid, line_no);
+        report_race("W-R", addr, other, t->tid, line_no, var);
         // Clear Wx so the same race is not re-reported on every subsequent
         // read — mirrors how FT clears x->W after a W-R report.
         x->Wx.clear();
@@ -499,7 +532,7 @@ static bool wcp_read_core(void* addr, int line_no,
 //  if ¬(Wx ⊑ C_t)  →  W-W race
 //  Wx := Wx ⊔ C_t;  Rx := ∅
 static bool wcp_write_core(void* addr, int line_no,
-                           VarState* x, ThreadState* t) {
+                           VarState* x, ThreadState* t, char* var) {
     uintptr_t xaddr = (uintptr_t)addr;
 
     // Record access in CS frames (for Lw update at release, line 8).
@@ -521,12 +554,12 @@ static bool wcp_write_core(void* addr, int line_no,
     bool raced = false;
     if (!vc_leq(x->Rx, Ct)) {
         int other = first_violating_tid(x->Rx, Ct);
-        report_race("R-W", addr, other, t->tid, line_no);
+        report_race("R-W", addr, other, t->tid, line_no, var);
         raced = true;
     }
     if (!vc_leq(x->Wx, Ct)) {
         int other = first_violating_tid(x->Wx, Ct);
-        report_race("W-W", addr, other, t->tid, line_no);
+        report_race("W-W", addr, other, t->tid, line_no, var);
         raced = true;
     }
 
@@ -559,16 +592,6 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
     return true;
 }
 
-__attribute__((destructor))
-void print_final_race_summary() {
-
-    printf("\n================ PERFORMANCE METRICS =====================\n");
-    printf("  Total WCP Read calls : %llu\n", slow_read_count.load());
-    printf("  Total WCP Write calls: %llu\n", slow_write_count.load());
-
-    printf("==========================================================\n");
-}
-
 // =============================================================================
 // SECTION 11 — SA SLOW PATHS
 //
@@ -579,10 +602,7 @@ void print_final_race_summary() {
 // =============================================================================
 
 static void wcp_sa_slow_read(void* addr, int line_no,
-                             ShadowEntry* e, ThreadState* t) {
-    
-
-    slow_read_count.fetch_add(1, std::memory_order_relaxed);
+                             ShadowEntry* e, ThreadState* t, char* var) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -646,7 +666,7 @@ static void wcp_sa_slow_read(void* addr, int line_no,
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = wcp_read_core(addr, line_no, x, t);
+                bool raced = wcp_read_core(addr, line_no, x, t, var);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_Ct = x->Wx;
                     x->owner_read_Ct  = t->Ct();
@@ -659,7 +679,7 @@ static void wcp_sa_slow_read(void* addr, int line_no,
 
         // ── SHARED: run WCP check directly ───────────────────────────────
         case ShareState::SHARED: {
-            bool raced = wcp_read_core(addr, line_no, x, t);
+            bool raced = wcp_read_core(addr, line_no, x, t, var);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_Ct = x->Wx;
                 x->owner_read_Ct  = t->Ct();
@@ -673,8 +693,7 @@ static void wcp_sa_slow_read(void* addr, int line_no,
 }
 
 static void wcp_sa_slow_write(void* addr, int line_no,
-                              ShadowEntry* e, ThreadState* t) {
-    slow_write_count.fetch_add(1, std::memory_order_relaxed);
+                              ShadowEntry* e, ThreadState* t, char* var) {
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -714,7 +733,7 @@ static void wcp_sa_slow_write(void* addr, int line_no,
             e->hot_word.store(pack_hot(t->tid, ShareState::SHARED),
                               std::memory_order_release);
             {
-                bool raced = wcp_write_core(addr, line_no, x, t);
+                bool raced = wcp_write_core(addr, line_no, x, t, var);
                 if (!raced && can_reclaim(t, x)) {
                     x->owner_write_Ct = t->Ct();
                     x->owner_read_Ct.clear();
@@ -726,7 +745,7 @@ static void wcp_sa_slow_write(void* addr, int line_no,
             return;
 
         case ShareState::SHARED: {
-            bool raced = wcp_write_core(addr, line_no, x, t);
+            bool raced = wcp_write_core(addr, line_no, x, t, var);
             if (!raced && can_reclaim(t, x)) {
                 x->owner_write_Ct = t->Ct();
                 x->owner_read_Ct.clear();
@@ -751,7 +770,7 @@ extern "C" {
 // update owner_read_Ct and return without any WCP work.
 // CAS validates that no other thread stole ownership between the load and now.
 // On CAS failure or non-owned state, fall through to wcp_sa_slow_read.
-void __wcp_read(void* addr, int line_no) {
+void __wcp_read(void* addr, int line_no, char* var) {
     if (in_wcp_runtime) return;
     struct Guard { ~Guard() { in_wcp_runtime = false; } } g;
     in_wcp_runtime = true;
@@ -783,11 +802,11 @@ void __wcp_read(void* addr, int line_no) {
         // CAS failed — ownership changed; fall through to slow path.
     }
 
-    wcp_sa_slow_read(addr, line_no, e, t);
+    wcp_sa_slow_read(addr, line_no, e, t, var);
 }
 
 // ── __wcp_write ───────────────────────────────────────────────────────────────
-void __wcp_write(void* addr, int line_no) {
+void __wcp_write(void* addr, int line_no, char* var) {
     if (in_wcp_runtime) return;
     struct Guard { ~Guard() { in_wcp_runtime = false; } } g;
     in_wcp_runtime = true;
@@ -814,7 +833,7 @@ void __wcp_write(void* addr, int line_no) {
             return;
     }
 
-    wcp_sa_slow_write(addr, line_no, e, t);
+    wcp_sa_slow_write(addr, line_no, e, t, var);
 }
 
 // ── Thread lifecycle ──────────────────────────────────────────────────────────
@@ -915,4 +934,37 @@ void __wcp_unlock(void* mutex_addr) {
     do_release(t, ls, mutex_addr);
 }
 
-} // extern "C"
+} 
+__attribute__((destructor))
+void print_final_race_summary() {
+    std::lock_guard<std::mutex> lock(get_race_summary_lock());
+    auto& summary_map = get_race_summary();
+
+    if (summary_map.empty()) return;
+
+    printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
+    for (const auto& pair : summary_map) {
+        void* addr = pair.first;
+        const auto& summary = pair.second;
+        
+        printf("Variable ADDR: %p\n", addr);
+        printf("Variable Name: %s\n", summary.var_name);
+        
+        if (summary.ww.occurred) {
+            printf("  [W-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.ww.tid1, summary.ww.tid2, summary.ww.line_no);
+        }
+        if (summary.rw.occurred) {
+            printf("  [R-W] Example: Thread %d and Thread %d at line %d\n",
+                   summary.rw.tid1, summary.rw.tid2, summary.rw.line_no);
+        }
+        if (summary.wr.occurred) {
+            printf("  [W-R] Example: Thread %d and Thread %d at line %d\n",
+                   summary.wr.tid1, summary.wr.tid2, summary.wr.line_no);
+        }
+        printf("----------------------------------------------------------\n");
+    }
+    printf("==========================================================\n");
+}
+
+// extern "C"
