@@ -11,7 +11,6 @@ TSAN_FLAGS  := -fsanitize=thread -g -O1
 # ──────────────────────────────────────────────────────────────────
 # SOURCE FILES
 # ──────────────────────────────────────────────────────────────────
-# PASS_SRC       := fasttrack_instrumentation_ver2.cpp
 PASS_SRC       := fasttrack_instrumentation.cpp
 PASS_NAME      := fasttrack-pass
 
@@ -21,6 +20,7 @@ TARGET_DIR     := targets/old_targets_dhruv
 
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
+
 TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
 # TARGET_SRC     := $(TARGET_DIR)/target_race.cpp
 # TARGET_SRC     := ./testing_temp_dir/src/test.cpp
