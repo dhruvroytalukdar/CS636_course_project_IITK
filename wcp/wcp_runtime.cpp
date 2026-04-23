@@ -249,6 +249,10 @@ struct VarState {
     mutable std::recursive_mutex mtx;
 };
 
+
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
+
 // ── Thread context: passed parent → child through pthread_create ──────────────
 struct ThreadContext {
     void *(*original_routine)(void *);
@@ -354,6 +358,10 @@ static void report_race(const char *type, void *addr,
 
 __attribute__((destructor))
 void print_final_race_summary() {
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total FT Read calls : %llu\n", slow_read_count.load());
+    printf("  Total FT Write calls: %llu\n", slow_write_count.load());
+
     std::lock_guard<std::mutex> lock(get_race_summary_lock());
     auto& summary_map = get_race_summary();
 
@@ -574,6 +582,8 @@ void __wcp_unlock(void *mutex_addr) {
 //   if ¬(Wx ⊑ C_t) → W-R race
 //   Rx := Rx ⊔ C_t
 void __wcp_read(void *addr, int line_no, char* var) {
+    slow_read_count.fetch_add(1, std::memory_order_relaxed);
+
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;
@@ -615,6 +625,7 @@ void __wcp_read(void *addr, int line_no, char* var) {
 //   if ¬(Wx ⊑ C_t)  → W-W race
 //   Wx := Wx ⊔ C_t
 void __wcp_write(void *addr, int line_no, char* var) {
+    slow_write_count.fetch_add(1, std::memory_order_relaxed);
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;

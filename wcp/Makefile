@@ -21,8 +21,9 @@ RUNTIME_WCP_SA  := wcp_runtime_with_sa.cpp
 
 # TARGET_DIR     := ./benchmarks/targets/old_targets_dhruv
 TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
-# TARGET_SRC      := ./testing_temp_dir/src/test.cpp
-TARGET_SRC    := $(TARGET_DIR)/test1.cpp
+TARGET_SRC    := $(TARGET_DIR)/test2.cpp
+# TARGET_SRC    := $(TARGET_DIR)/test2.cpp
+# TARGET_SRC    := $(TARGET_DIR)/test_efficiency.cpp
 
 BUILD_DIR       := build_wcp
 TARGET_NAME     := $(notdir $(basename $(TARGET_SRC)))
@@ -167,27 +168,27 @@ run: $(BENCH_WCP) $(BENCH_WCP_SA) $(ESCAPE_EXEC_WCP) $(ESCAPE_EXEC_WCP_SA)
 
 	@echo ""
 	@echo "====== WCP + Sharing Analysis ======"
-	@/usr/bin/time -p -o time_sa.txt $(BENCH_WCP_SA) 2>&1 | tee $(OUT_SA)
+	@/usr/bin/time -p -o time_sa.txt $(BENCH_WCP_SA) 2>&1 | tee $(OUT_WCP_SA)
 
 	@echo ""
 	@echo "====== Escape Analysis + WCP ======"
-	@/usr/bin/time -p -o time_escape.txt $(ESCAPE_EXEC_WCP) 2>&1 | tee $(OUT_ESCAPE)
+	@/usr/bin/time -p -o time_escape.txt $(ESCAPE_EXEC_WCP) 2>&1 | tee $(OUT_ESCAPE_WCP)
 
 	@echo ""
 	@echo "====== Escape Analysis + SA + WCP ======"
-	@/usr/bin/time -p -o time_escape_sa.txt $(ESCAPE_EXEC_WCP_SA) 2>&1 | tee $(OUT_ESCAPE_SA)
+	@/usr/bin/time -p -o time_escape_sa.txt $(ESCAPE_EXEC_WCP_SA) 2>&1 | tee $(OUT_ESCAPE_WCP_SA)
 
-# 	@echo ""
-# 	@echo "====== Unique Race Report Counts ======"
-# 	@# Count the lines containing "Variable Name:" from the summary blocks
-# 	@FT=$$(grep -c 'Variable Name:' $(OUT_WCP) 2>/dev/null || echo 0); \
-# 	 SA=$$(grep -c 'Variable Name:' $(OUT_SA) 2>/dev/null || echo 0); \
-# 	 EA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE) 2>/dev/null || echo 0); \
-# 	 ESA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE_SA) 2>/dev/null || echo 0); \
-# 	 echo "  plain FT       : $${FT}"; \
-# 	 echo "  SA + FT        : $${SA}"; \
-# 	 echo "  escape FT      : $${EA}"; \
-# 	 echo "  escape + SA FT : $${ESA}"
+	@echo ""
+	@echo "====== Unique Race Report Counts ======"
+	@# Count the lines containing "Variable Name:" from the summary blocks
+	@FT=$$(grep -c 'Variable Name:' $(OUT_WCP) 2>/dev/null || echo 0); \
+	 SA=$$(grep -c 'Variable Name:' $(OUT_WCP_SA) 2>/dev/null || echo 0); \
+	 EA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE_WCP) 2>/dev/null || echo 0); \
+	 ESA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE_WCP_SA) 2>/dev/null || echo 0); \
+	 echo "  plain WCP       : $${FT}"; \
+	 echo "  SA + WCP        : $${SA}"; \
+	 echo "  escape WCP      : $${EA}"; \
+	 echo "  escape + SA WCP : $${ESA}"
 
 	@echo ""
 	@echo "====== Execution Times ======"

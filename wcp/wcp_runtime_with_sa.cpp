@@ -110,6 +110,10 @@ static inline int hot_owner(uint64_t w) {
 // SECTION 2 — WCP VECTOR CLOCK HELPERS
 // =============================================================================
 
+
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
+
 using VClock = std::vector<int>;
 
 static inline void vc_ensure(VClock& v, int idx) {
@@ -603,6 +607,7 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 
 static void wcp_sa_slow_read(void* addr, int line_no,
                              ShadowEntry* e, ThreadState* t, char* var) {
+    slow_read_count.fetch_add(1, std::memory_order_relaxed);
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -694,6 +699,7 @@ static void wcp_sa_slow_read(void* addr, int line_no,
 
 static void wcp_sa_slow_write(void* addr, int line_no,
                               ShadowEntry* e, ThreadState* t, char* var) {
+    slow_write_count.fetch_add(1, std::memory_order_relaxed);
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -937,6 +943,10 @@ void __wcp_unlock(void* mutex_addr) {
 } 
 __attribute__((destructor))
 void print_final_race_summary() {
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total FT Read calls : %llu\n", slow_read_count.load());
+    printf("  Total FT Write calls: %llu\n", slow_write_count.load());
+
     std::lock_guard<std::mutex> lock(get_race_summary_lock());
     auto& summary_map = get_race_summary();
 

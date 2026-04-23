@@ -26,8 +26,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define NUM_VARS    100
-#define NUM_THREADS 4
+#define NUM_VARS    1000
+#define NUM_THREADS 8
 #define ITERATIONS  2000
 
 static int          shared_vars[NUM_VARS];
