@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
-
+// #define DEBUG
 //fix threads, to avoid vector resizing issues(realised
 //vectors not thread safe)
 const int MAX_THREADS = 200; 
@@ -265,31 +265,42 @@ void report_race(racetype type, int tid1, int tid2, unsigned long addr) {
     if (reported_races.find(key) == reported_races.end()) {
         reported_races.insert(key);
         races.push_back({type, tid1, tid2, addr});
-
+        #ifdef DEBUG
         // Print original log message as it happens
         printf("[Race Detected] %s Thread TID1: %d, TID2: %d ADDR: %lx\n", type_str, tid1, tid2, addr);
+        #endif
     }
 
     race_vector_lock.unlock();
 }
 __attribute__((destructor))
 void print_final_race_summary() {
-    if (race_summary.empty()) return;
+    // Acquire the lock to prevent background threads from modifying the map while we iterate
+    race_vector_lock.lock(); 
+    
+    auto& summary = get_race_summary_map();
+    
+    if (summary.empty()) {
+        race_vector_lock.unlock();
+        return;
+    }
 
     printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
-    for (const auto& pair : race_summary) {
+    for (const auto& pair : summary) {
         unsigned long addr = pair.first;
         uint8_t flags = pair.second;
 
         printf("Variable ADDR: %lx | Race Types: [ ", addr);
-
+        
         if (flags & FLAG_WW) printf("W-W ");
         if (flags & FLAG_RW) printf("R-W ");
         if (flags & FLAG_WR) printf("W-R ");
-
+        
         printf("]\n");
     }
     printf("==========================================================\n");
+    
+    race_vector_lock.unlock();
 }
 //void report_race(racetype type, int tid1, int tid2, unsigned long addr) {
 //    race_vector_lock.lock();

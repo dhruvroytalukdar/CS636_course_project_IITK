@@ -22,6 +22,8 @@ RUNTIME_OBJ = runtime.o
 BASE_PASS = base_pass2.cpp
 TARGET_PASS = target_pass.cpp
 # TARGET_PASS = escape_pass_ver2.cpp 
+# TARGET_PASS = target_pass.cpp
+# TARGET_PASS = target_pass2.cpp 
 
 # The pass pipeline names (MUST match the names registered in llvmGetPassPluginInfo)
 # Update these if your PassPluginInfo registers different string names!
