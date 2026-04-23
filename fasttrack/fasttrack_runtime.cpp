@@ -219,11 +219,11 @@ LockState* get_lock_state(void* mutex_addr) {
 void report_race(const char* type, void* addr, int tid1, int tid2, int line_no, char* var_name) {
     race_count.fetch_add(1, std::memory_order_relaxed);
     
-    std::lock_guard<std::mutex> lock(get_race_summary_lock());
-    auto& summary = get_race_summary()[addr];
-    if(var_name != nullptr)summary.var_name = var_name;
-    // Record the first instance of each race type for this specific address
     #ifndef DEBUG
+        std::lock_guard<std::mutex> lock(get_race_summary_lock());
+        auto& summary = get_race_summary()[addr];
+        if(var_name != nullptr)summary.var_name = var_name;
+        // Record the first instance of each race type for this specific address
         if (strcmp(type, "W-R") == 0 && !summary.wr.occurred) {
             summary.wr = {true, tid1, tid2, line_no};
         } else if (strcmp(type, "W-W") == 0 && !summary.ww.occurred) {

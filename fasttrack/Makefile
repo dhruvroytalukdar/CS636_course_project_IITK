@@ -17,11 +17,11 @@ PASS_NAME      := fasttrack-pass
 
 
 ESCAPE_PASS_SRC := escape_instrumentation.cpp 
-TARGET_DIR     := targets/old_targets_dhruv
+TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
 
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
-TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
+TARGET_SRC     := $(TARGET_DIR)/test1.cpp
 # TARGET_SRC     := $(TARGET_DIR)/target_race.cpp
 # TARGET_SRC     := ./testing_temp_dir/src/test.cpp
 
@@ -201,44 +201,41 @@ run: $(BENCH_FT) $(BENCH_SA) $(ESCAPE_EXEC) $(ESCAPE_EXEC_SA)
 	@echo "Using LLVM from: $$(which clang++)"
 	@echo ""
 	@echo "====== Plain FastTrack ======"
-	./$(BENCH_FT) 2>&1 | tee $(OUT_FT)
+	@/usr/bin/time -p -o time_ft.txt ./$(BENCH_FT) 2>&1 | tee $(OUT_FT)
 
 	@echo ""
 	@echo "====== FastTrack + Sharing Analysis ======"
-	./$(BENCH_SA) 2>&1 | tee $(OUT_SA)
+	@/usr/bin/time -p -o time_sa.txt ./$(BENCH_SA) 2>&1 | tee $(OUT_SA)
 
 	@echo ""
 	@echo "====== Escape Analysis + FastTrack ======"
-	./$(ESCAPE_EXEC) 2>&1 | tee $(OUT_ESCAPE)
+	@/usr/bin/time -p -o time_escape.txt ./$(ESCAPE_EXEC) 2>&1 | tee $(OUT_ESCAPE)
 
 	@echo ""
 	@echo "====== Escape Analysis + SA + FastTrack ======"
-	./$(ESCAPE_EXEC_SA) 2>&1 | tee $(OUT_ESCAPE_SA)
+	@/usr/bin/time -p -o time_escape_sa.txt ./$(ESCAPE_EXEC_SA) 2>&1 | tee $(OUT_ESCAPE_SA)
 
 	@echo ""
-	@echo "====== Race Report Counts ======"
-	@FT=$$(grep -c 'FASTTRACK LOG' $(OUT_FT) 2>/dev/null || echo 0); \
-	 SA=$$(grep -c 'FASTTRACK LOG' $(OUT_SA) 2>/dev/null || echo 0); \
-	 EA=$$(grep -c 'FASTTRACK LOG' $(OUT_ESCAPE) 2>/dev/null || echo 0); \
-	 ESA=$$(grep -c 'FASTTRACK LOG' $(OUT_ESCAPE_SA) 2>/dev/null || echo 0); \
+	@echo "====== Unique Race Report Counts ======"
+	@# Count the lines containing "Variable Name:" from the summary blocks
+	@FT=$$(grep -c 'Variable Name:' $(OUT_FT) 2>/dev/null || echo 0); \
+	 SA=$$(grep -c 'Variable Name:' $(OUT_SA) 2>/dev/null || echo 0); \
+	 EA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE) 2>/dev/null || echo 0); \
+	 ESA=$$(grep -c 'Variable Name:' $(OUT_ESCAPE_SA) 2>/dev/null || echo 0); \
 	 echo "  plain FT       : $${FT}"; \
 	 echo "  SA + FT        : $${SA}"; \
 	 echo "  escape FT      : $${EA}"; \
 	 echo "  escape + SA FT : $${ESA}"
 
 	@echo ""
-	@echo "====== Wall Time ======"
-	@grep "Launch to finish" $(OUT_FT)        | sed 's/^/  plain FT       : /'
-	@grep "Launch to finish" $(OUT_SA)        | sed 's/^/  SA + FT        : /'
-	@grep "Launch to finish" $(OUT_ESCAPE)    | sed 's/^/  escape FT      : /'
-	@grep "Launch to finish" $(OUT_ESCAPE_SA) | sed 's/^/  escape + SA FT : /'
+	@echo "====== Execution Times ======"
+	@echo "  plain FT       : $$(grep real time_ft.txt | awk '{print $$2}')s"
+	@echo "  SA + FT        : $$(grep real time_sa.txt | awk '{print $$2}')s"
+	@echo "  escape FT      : $$(grep real time_escape.txt | awk '{print $$2}')s"
+	@echo "  escape + SA FT : $$(grep real time_escape_sa.txt | awk '{print $$2}')s"
 
-	@echo ""
-	@echo "====== First Race Report ======"
-	@grep 'FASTTRACK LOG' $(OUT_FT)        | head -1 | sed 's/^/  plain FT       : /'
-	@grep 'FASTTRACK LOG' $(OUT_SA)        | head -1 | sed 's/^/  SA + FT        : /'
-	@grep 'FASTTRACK LOG' $(OUT_ESCAPE)    | head -1 | sed 's/^/  escape FT      : /'
-	@grep 'FASTTRACK LOG' $(OUT_ESCAPE_SA) | head -1 | sed 's/^/  escape + SA FT : /'
+	@# Clean up temporary time files
+	@rm -f time_ft.txt time_sa.txt time_escape.txt time_escape_sa.txt
 
 # ──────────────────────────────────────────────────────────────────
 # COMPARE — TSAN-based automated Python validation
