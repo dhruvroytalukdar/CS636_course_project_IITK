@@ -116,8 +116,18 @@ struct BlockState {
             ///this is the case discussed earlier if allocation exist then merge or update it.
             ///really a fancy way of checking if contains, if yes then calling merge
             auto [It, Ins] = Allocs.try_emplace(Base, Info);
+            //if already exists
             if (!Ins) It->second.merge(Info);
         }
+        // remainder tracked allocation means, we are confident these things have not yet
+        // escaped and are local, anything outside it, instrument it.
+        //
+        // PROVE A POINTER MUST BE THREAD LOCAL.
+        // take intersection of the aliases. 
+        // a alias get created inside a BB, it gets out of scope unless it is passed through a phinode.
+        // so its ok to take intersection we are not missing anything.
+        // if we take union then a alias might be later joined using phi, in one path it points to a local var
+        // and in another to a global, if we include it in tracked then we dont instrument the global.
         SmallVector<Value *, 8> Drop;
         for (auto &[Alias, Base] : Aliases)
             if (!O.Aliases.count(Alias)) Drop.push_back(Alias);
@@ -135,6 +145,7 @@ struct BlockState {
 
 // ThreadEscapeAnalysis — intra-procedural, flow-sensitive
 // attention on "intra-procedural"
+// consider functions as black boxes, conservative === sound.
 class ThreadEscapeAnalysis {
 private:
     Function      &F;
@@ -158,7 +169,8 @@ public:
 
 
         // RPO traversal — processes dominators before dominated blocks.
-        // a post order DFS traversal then reverse it 
+        // a post order DFS traversal then reverse it
+        // start from top of the tree.
         SmallVector<BasicBlock *, 32> RPO;
         for (BasicBlock *BB : ReversePostOrderTraversal<Function *>(&F))
             RPO.push_back(BB);
@@ -194,6 +206,7 @@ public:
             for (Instruction &I : *BB)
                 //update the basic block i.e alias, state, allocs and points to
                 handleInst(I, Out);
+
 
 
             auto [It, Ins] = OutStates.try_emplace(BB, Out);
