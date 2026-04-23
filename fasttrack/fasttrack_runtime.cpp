@@ -114,6 +114,9 @@ struct alignas(64) ShadowEntry {
 static std::atomic<int> next_tid{1};
 static std::atomic<int> race_count{0};
 
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
+
 // Array for fast lookup
 static ShadowEntry shadow_table[SHADOW_SIZE];
 
@@ -243,6 +246,10 @@ __attribute__((destructor))
 void print_final_race_summary() {
     std::lock_guard<std::mutex> lock(get_race_summary_lock());
     auto& summary_map = get_race_summary();
+    
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total FT Read calls : %llu\n", slow_read_count.load());
+    printf("  Total FT Write calls: %llu\n", slow_write_count.load());
 
     if (summary_map.empty()) return;
 
@@ -268,6 +275,7 @@ void print_final_race_summary() {
         }
         printf("----------------------------------------------------------\n");
     }
+
     printf("==========================================================\n");
 }
 
@@ -449,6 +457,8 @@ extern "C" {
         struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
         in_ft_runtime = true;
 
+        slow_read_count.fetch_add(1, std::memory_order_relaxed);
+
         ThreadState* t = get_current_thread();
         VarState* x = get_var_state(addr);
 
@@ -504,6 +514,9 @@ extern "C" {
         if (in_ft_runtime) return;
         struct Guard { ~Guard(){ in_ft_runtime=false; } } g;
         in_ft_runtime = true;
+
+        slow_write_count.fetch_add(1, std::memory_order_relaxed);
+
         ThreadState* t = get_current_thread();
         VarState* x = get_var_state(addr);
 

@@ -22,7 +22,7 @@ RUNTIME_WCP_SA  := wcp_runtime_with_sa.cpp
 # TARGET_DIR     := ./benchmarks/targets/old_targets_dhruv
 TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
 # TARGET_SRC      := ./testing_temp_dir/src/test.cpp
-TARGET_SRC    := $(TARGET_DIR)/test1.cpp
+TARGET_SRC    := $(TARGET_DIR)/test2.cpp
 
 BUILD_DIR       := build_wcp
 TARGET_NAME     := $(notdir $(basename $(TARGET_SRC)))
@@ -162,19 +162,19 @@ instrument_escape: $(ESCAPE_EXEC_WCP) $(ESCAPE_EXEC_WCP_SA)
 run: $(BENCH_WCP) $(BENCH_WCP_SA) $(ESCAPE_EXEC_WCP) $(ESCAPE_EXEC_WCP_SA)
 	@echo "Using LLVM from: $$(which clang++)"
 	@echo ""
-	@echo "====== Plain FastTrack ======"
+	@echo "====== Plain WCP ======"
 	@/usr/bin/time -p -o time_ft.txt $(BENCH_WCP) 2>&1 | tee $(OUT_WCP)
 
 	@echo ""
-	@echo "====== FastTrack + Sharing Analysis ======"
+	@echo "====== WCP + Sharing Analysis ======"
 	@/usr/bin/time -p -o time_sa.txt $(BENCH_WCP_SA) 2>&1 | tee $(OUT_SA)
 
 	@echo ""
-	@echo "====== Escape Analysis + FastTrack ======"
+	@echo "====== Escape Analysis + WCP ======"
 	@/usr/bin/time -p -o time_escape.txt $(ESCAPE_EXEC_WCP) 2>&1 | tee $(OUT_ESCAPE)
 
 	@echo ""
-	@echo "====== Escape Analysis + SA + FastTrack ======"
+	@echo "====== Escape Analysis + SA + WCP ======"
 	@/usr/bin/time -p -o time_escape_sa.txt $(ESCAPE_EXEC_WCP_SA) 2>&1 | tee $(OUT_ESCAPE_SA)
 
 # 	@echo ""
@@ -191,31 +191,14 @@ run: $(BENCH_WCP) $(BENCH_WCP_SA) $(ESCAPE_EXEC_WCP) $(ESCAPE_EXEC_WCP_SA)
 
 	@echo ""
 	@echo "====== Execution Times ======"
-	@echo "  plain FT       : $$(grep real time_ft.txt | awk '{print $$2}')s"
-	@echo "  SA + FT        : $$(grep real time_sa.txt | awk '{print $$2}')s"
-	@echo "  escape FT      : $$(grep real time_escape.txt | awk '{print $$2}')s"
-	@echo "  escape + SA FT : $$(grep real time_escape_sa.txt | awk '{print $$2}')s"
+	@echo "  plain WCP       : $$(grep real time_ft.txt | awk '{print $$2}')s"
+	@echo "  SA + WCP        : $$(grep real time_sa.txt | awk '{print $$2}')s"
+	@echo "  escape WCP      : $$(grep real time_escape.txt | awk '{print $$2}')s"
+	@echo "  escape + SA WCP : $$(grep real time_escape_sa.txt | awk '{print $$2}')s"
 
 	@# Clean up temporary time files
 	@rm -f time_ft.txt time_sa.txt time_escape.txt time_escape_sa.txt
 
-
-# ──────────────────────────────────────────────────────────────────
-# COMPARE — TSAN-based automated Python validation
-# ──────────────────────────────────────────────────────────────────
-compare: $(BENCH_TSAN) $(TARGET_LL) $(BENCH_WCP) $(BENCH_WCP_SA)
-	@echo "========================================"
-	@echo " Running Executions..."
-	@echo "========================================"
-	-./$(BENCH_TSAN)   2>&1 | tee $(OUT_TSAN)   > /dev/null
-	-./$(BENCH_WCP)    2>&1 | tee $(OUT_WCP)    > /dev/null
-	-./$(BENCH_WCP_SA) 2>&1 | tee $(OUT_WCP_SA) > /dev/null
-	@echo "[Done] Logs saved to $(BUILD_DIR)/"
-	@echo ""
-	@echo "========================================"
-	@echo " Running Automated Python Analysis..."
-	@echo "========================================"
-	@python3 compare_races.py $(TARGET_SRC)
 
 # ──────────────────────────────────────────────────────────────────
 # DEBUG — show instrumentation call counts in the instrumented IR
@@ -255,7 +238,6 @@ help:
 	@echo ""
 	@echo "TSAN validation:"
 	@echo "  make bench_tsan       Build TSAN-instrumented binary"
-	@echo "  make compare          Run TSAN + WCP + WCP+SA and analyse with Python"
 	@echo "  make target_ir        Emit human-readable IR for Python race mapper"
 	@echo ""
 	@echo "Output logs (all in $(BUILD_DIR)/):"

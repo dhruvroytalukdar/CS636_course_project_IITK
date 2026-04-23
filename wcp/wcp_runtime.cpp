@@ -120,6 +120,9 @@ struct CSFrame {
 static std::recursive_mutex                          g_csframe_mtx;
 static std::unordered_map<int, std::vector<CSFrame>> g_csframes;
 
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
+
 // Push a new frame when a lock is acquired.
 static void csframe_push(int tid, void *lock_addr) {
     std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
@@ -438,6 +441,17 @@ void *thread_wrapper(void *raw_arg) {
     return fn(fn_arg);
 }
 
+__attribute__((destructor))
+void print_final_race_summary() {
+
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total WCP Read calls : %llu\n", slow_read_count.load());
+    printf("  Total WCP Write calls: %llu\n", slow_write_count.load());
+
+    printf("==========================================================\n");
+}
+
+
 void __wcp_thread_create(uint64_t /*child_id_raw*/) {
     // No-op: parent clock already incremented in __wcp_prepare_context.
 }
@@ -503,6 +517,8 @@ void __wcp_unlock(void *mutex_addr) {
 //   if ¬(Wx ⊑ C_t) → W-R race
 //   Rx := Rx ⊔ C_t
 void __wcp_read(void *addr, int line_no) {
+    slow_read_count.fetch_add(1, std::memory_order_relaxed);
+
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;
@@ -544,6 +560,7 @@ void __wcp_read(void *addr, int line_no) {
 //   if ¬(Wx ⊑ C_t)  → W-W race
 //   Wx := Wx ⊔ C_t
 void __wcp_write(void *addr, int line_no) {
+    slow_write_count.fetch_add(1, std::memory_order_relaxed);
     ThreadState *t  = get_current_thread();
     VarState    *vs = get_var_state(addr);
     uintptr_t xaddr = (uintptr_t)addr;

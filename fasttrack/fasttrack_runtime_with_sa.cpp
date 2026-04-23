@@ -166,6 +166,8 @@ static std::atomic<int> race_count {0};
 static ShadowEntry      shadow_table[SHADOW_SIZE];
 static thread_local ThreadState* tl_thread_state = nullptr;
 static thread_local bool in_ft_runtime = false;
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
 
 
 static std::recursive_mutex& get_thread_map_lock() {
@@ -280,6 +282,10 @@ void print_final_race_summary() {
     std::lock_guard<std::mutex> lock(get_race_summary_lock());
     auto& summary_map = get_race_summary();
 
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total FT Read calls : %llu\n", slow_read_count.load());
+    printf("  Total FT Write calls: %llu\n", slow_write_count.load());
+
     if (summary_map.empty()) return;
 
     printf("\n================ RACE SUMMARY BY VARIABLE ================\n");
@@ -304,6 +310,7 @@ void print_final_race_summary() {
         }
         printf("----------------------------------------------------------\n");
     }
+
     printf("==========================================================\n");
 }
 // static void report_race(const char* type, void* addr, int tid1, int tid2, int line_no) {
@@ -435,6 +442,8 @@ static bool ft_write_core(void* addr, int line_no, VarState* x, ThreadState* t, 
 // ──────────────────────────────────────────────────────────────────
 
 static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
+    slow_read_count.fetch_add(1, std::memory_order_relaxed);    
+
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -508,6 +517,7 @@ static void ft_slow_read(void* addr, int line_no, ShadowEntry* e, ThreadState* t
 }
 
 static void ft_slow_write(void* addr, int line_no, ShadowEntry* e, ThreadState* t, char* var_name) {
+    slow_write_count.fetch_add(1, std::memory_order_relaxed);
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);

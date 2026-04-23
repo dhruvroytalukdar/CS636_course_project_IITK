@@ -26,7 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define NUM_VARS    500
+#define NUM_VARS    100
 #define NUM_THREADS 4
 #define ITERATIONS  2000
 

@@ -223,6 +223,9 @@ struct CSFrame {
 static std::recursive_mutex                          g_csframe_mtx;
 static std::unordered_map<int, std::vector<CSFrame>> g_csframes;
 
+static std::atomic<unsigned long long> slow_read_count{0};
+static std::atomic<unsigned long long> slow_write_count{0};
+
 static void csframe_push(int tid, void *lock_addr) {
     std::lock_guard<std::recursive_mutex> lk(g_csframe_mtx);
     g_csframes[tid].push_back({lock_addr, {}, {}});
@@ -556,6 +559,16 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
     return true;
 }
 
+__attribute__((destructor))
+void print_final_race_summary() {
+
+    printf("\n================ PERFORMANCE METRICS =====================\n");
+    printf("  Total WCP Read calls : %llu\n", slow_read_count.load());
+    printf("  Total WCP Write calls: %llu\n", slow_write_count.load());
+
+    printf("==========================================================\n");
+}
+
 // =============================================================================
 // SECTION 11 — SA SLOW PATHS
 //
@@ -567,6 +580,9 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 
 static void wcp_sa_slow_read(void* addr, int line_no,
                              ShadowEntry* e, ThreadState* t) {
+    
+
+    slow_read_count.fetch_add(1, std::memory_order_relaxed);
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);
@@ -658,6 +674,7 @@ static void wcp_sa_slow_read(void* addr, int line_no,
 
 static void wcp_sa_slow_write(void* addr, int line_no,
                               ShadowEntry* e, ThreadState* t) {
+    slow_write_count.fetch_add(1, std::memory_order_relaxed);
     VarState* x = get_or_alloc_var_state(e);
     std::lock_guard<std::recursive_mutex> var_lk(x->mtx);
     std::lock_guard<std::recursive_mutex> thr_lk(t->mtx);

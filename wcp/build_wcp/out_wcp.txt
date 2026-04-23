@@ -1,0 +1,6 @@
+Fast path test complete.
+
+================ PERFORMANCE METRICS =====================
+  Total WCP Read calls : 212000050
+  Total WCP Write calls: 88000027
+==========================================================
