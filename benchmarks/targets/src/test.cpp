@@ -1,3 +1,4 @@
+#include<iostream>
 #include<pthread.h>
 #include<vector>
 using namespace std;
@@ -45,7 +46,7 @@ static void test5_escape_via_vector() {
 int main(){
     test5_escape_via_vector();
     for(int i=0;i<g_ptrs.size();i++){
-        cout << g_ptrs[i] << endl;
+        std::cout << g_ptrs[i] << "\n";
     }
     return 0;
 }

@@ -1,4 +1,4 @@
-CXX         := clang++ -O1
+CXX         := clang++ 
 OPT         := opt
 LLVM_CONFIG := llvm-config
 
@@ -17,12 +17,11 @@ PASS_NAME      := fasttrack-pass
 
 ESCAPE_PASS_SRC := escape_instrumentation.cpp 
 TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
-# TARGET_DIR     := ../benchmarks/targets/old_targets_dhruv
 
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
 
-TARGET_SRC     := $(TARGET_DIR)/new/b4.cpp
+TARGET_SRC     := $(TARGET_DIR)/test4.cpp
 # TARGET_SRC     := $(TARGET_DIR)/cases.c
 # TARGET_SRC     := ../benchmarks/targets/src/test.cpp
 # TARGET_SRC     := $(TARGET_DIR)/no_sharing.cpp
@@ -102,7 +101,7 @@ $(PLUGIN): $(PASS_SRC) | $(BUILD_DIR)
 # ──────────────────────────────────────────────────────────────────
 $(TARGET_BC): $(TARGET_SRC) | $(BUILD_DIR)
 	@echo "[2] Compiling target to bitcode..."
-	$(CXX) -emit-llvm -fno-inline -fno-builtin \
+	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin \
 	       -fno-omit-frame-pointer -g \
 	       -c $(TARGET_SRC) -o $@
 
@@ -129,11 +128,11 @@ $(TARGET_INST_BC): $(TARGET_BC) $(PLUGIN)
 # ──────────────────────────────────────────────────────────────────
 $(RUNTIME_FT_OBJ): $(RUNTIME_FT) | $(BUILD_DIR)
 	@echo "[4a] Compiling plain FT runtime..."
-	$(CXX) -g -c $(RUNTIME_FT) -o $@
+	$(CXX) -O0 -g -c $(RUNTIME_FT) -o $@
 
 $(RUNTIME_SA_OBJ): $(RUNTIME_SA) | $(BUILD_DIR)
 	@echo "[4b] Compiling SA+FT runtime..."
-	$(CXX) -g -c $(RUNTIME_SA) -o $@
+	$(CXX) -O0 -g -c $(RUNTIME_SA) -o $@
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -171,11 +170,11 @@ instrument_escape: $(ESCAPE_EXEC) $(ESCAPE_EXEC_SA)
 
 $(SA_TEST_BASE): $(SA_TEST_SRC) | $(BUILD_DIR)
 	@echo "[9a] Compiling uninstrumented SA correctness baseline..."
-	$(CXX)  -g -std=c++17 $(SA_TEST_SRC) -o $@ -lpthread
+	$(CXX) -O0 -g -std=c++17 $(SA_TEST_SRC) -o $@ -lpthread
 
 $(SA_TEST_BC): $(SA_TEST_SRC) | $(BUILD_DIR)
 	@echo "[9b] Compiling SA correctness test to bitcode..."
-	$(CXX) -emit-llvm  -fno-inline -fno-builtin \
+	$(CXX) -emit-llvm -O0 -fno-inline -fno-builtin \
 	       -fno-omit-frame-pointer -g -std=c++17 \
 	       -c $(SA_TEST_SRC) -o $@
 

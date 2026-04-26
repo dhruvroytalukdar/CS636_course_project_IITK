@@ -1,6 +1,0 @@
-pbzip2
-*.o
-*.a
-/run/
-/run_race/
-
