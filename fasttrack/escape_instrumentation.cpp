@@ -193,10 +193,10 @@ public:
             bool First = true;
             //merge and skip back edge predecessor that has not been processed yet/
             for (BasicBlock *Pred : predecessors(BB)) {
-                if (!Visited.count(Pred)) continue; // back-edge — skip
+                if(!Visited.count(Pred)) continue; // back-edge — skip
                 auto It = OutStates.find(Pred);
-                if (It == OutStates.end()) continue;
-                if (First) { In = It->second;First = false;
+                if(It == OutStates.end()) continue;
+                if(First) { In = It->second;First = false;
                                 //block state  
                 }
                 else         In.merge(It->second);
@@ -304,7 +304,19 @@ private:
                     if (Value *B = S.baseOf(Ret))
                         escapeBase(B, S);
         }
+        else {
+        // For any unhandled instruction, check if a tracked pointer
+        // is being used as an operand. If yes, assume it escapes.
+        for (Use &U : I.operands()) {
+            Value *Op = U.get();
+            if (Op->getType()->isPointerTy()) {
+                if (Value *B = S.baseOf(Op)) {
+                    escapeBase(B, S);
+                }
+            }
+        }
     }
+}
 
     void handleCall(CallInst *CI, BlockState &S) {
         //THREE types of functions. 
