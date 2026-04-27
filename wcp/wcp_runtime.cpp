@@ -1,57 +1,6 @@
 // =============================================================================
 // Runtime library for the WCP (Weak-Causally-Precedes) race detector.
 // =============================================================================
-//
-//   State per thread t:
-//     N_t   — local integer clock (starts at 1, incremented after each release)
-//     H_t   — vector clock: HB time of last event in t
-//     P_t   — vector clock: WCP-predecessor time of last event in t
-//     C_t   = P_t[t := N_t]
-//
-//   State per lock ℓ:
-//     H_ℓ        — HB time of last rel(ℓ) seen
-//     P_ℓ        — WCP-predecessor time of last rel(ℓ) seen
-//     Acq_ℓ(t)  — FIFO of C_t snapshots from acq(ℓ) events by threads t'≠t
-//     Rel_ℓ(t)  — FIFO of H_t snapshots from rel(ℓ) events by threads t'≠t
-//
-//   State per (lock ℓ, variable x):
-//     Lr[ℓ][x]  — join of H_t of all rel(ℓ) whose CS contained r(x)
-//     Lw[ℓ][x]  — join of H_t of all rel(ℓ) whose CS contained w(x)
-//
-//   State per variable x:
-//     Rx, Wx  — join of C_e for reads/writes (for WCP-race checking)
-//
-//   procedure acquire(t, ℓ)
-//     1: H_t := H_t ⊔ H_ℓ
-//     2: P_t := P_t ⊔ P_ℓ
-//     3: ∀ t'≠t: Acq_ℓ(t').Enqueue(C_t)
-//
-//   procedure release(t, ℓ, R, W)
-//     4-6: while Acq_ℓ(t).front() ⊑ C_t:
-//              Acq_ℓ(t).Dequeue()
-//              P_t := P_t ⊔ Rel_ℓ(t).Dequeue()
-//     7:   ∀ x∈R: Lr[ℓ][x] := Lr[ℓ][x] ⊔ H_t
-//     8:   ∀ x∈W: Lw[ℓ][x] := Lw[ℓ][x] ⊔ H_t
-//     9:   H_ℓ := H_t;  P_ℓ := P_t
-//    10:   ∀ t'≠t: Rel_ℓ(t').Enqueue(H_t)
-//          N_t++  (local clock bump after every release)
-//
-//   procedure read(t, x, L)
-//    11: P_t := P_t ⊔ (⊔_{ℓ∈L} Lw[ℓ][x])
-//        Race: ¬(Wx ⊑ C_t)  → W-R
-//        Rx := Rx ⊔ C_t
-//
-//   procedure write(t, x, L)
-//    12: P_t := P_t ⊔ (⊔_{ℓ∈L} (Lr[ℓ][x] ⊔ Lw[ℓ][x]))
-//        Race: ¬(Rx ⊑ C_t)  → R-W
-//              ¬(Wx ⊑ C_t)  → W-W
-//        Wx := Wx ⊔ C_t
-//
-// ── FORK / JOIN ──────────────────────────────────────────────────────────────
-//   fork:  parent N_t++, snapshot (H_t, P_t) → child initialises from snapshot
-//   join:  H_parent ⊔= H_child;  P_parent ⊔= P_child
-//
-// =============================================================================
 
 #include <bits/stdc++.h>
 #include <pthread.h>
@@ -82,7 +31,6 @@ std::mutex& get_race_summary_lock() {
     static auto* mtx = new std::mutex();
     return *mtx;
 }
-// Global lock for the summary map
 
 
 // Heap-allocated map to survive C++ static destruction sequence

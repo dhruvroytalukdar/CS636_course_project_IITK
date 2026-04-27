@@ -1,5 +1,0 @@
-Fast path test complete.
-
-================ PERFORMANCE METRICS =====================
-  Total FT Read calls : 424098
-  Total FT Write calls: 176051

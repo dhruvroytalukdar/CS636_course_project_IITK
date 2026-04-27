@@ -1,48 +1,4 @@
-// =============================================================================
-// wcp_runtime_with_sa.cpp
-//
 // WCP (Weak-Causally-Precedes) race detector with Sharing Analysis fast path.
-//
-// ARCHITECTURE
-// ============
-// The SA layer sits in front of the WCP core exactly as it does in the FT+SA
-// runtime.  The shadow table and hot-word state machine are identical:
-//
-//   UNACCESSED  ──read──►  OWNED_READ  ──other thread──►  SHARED
-//   UNACCESSED  ─write──►  OWNED_WRITE ──other thread──►  SHARED
-//   OWNED_*     ──same──►  OWNED_*     (fast path, no WCP work at all)
-//   SHARED      ──any───►  wcp_{slow_read,slow_write}
-//
-// The WCP client replaces every call that was previously to ft_read_core /
-// ft_write_core.  Everything else — shadow table, hot-word CAS, can_reclaim,
-// owner_{read,write}_epoch cache — stays byte-for-byte the same.
-//
-// WCP STATE PER THREAD
-//   N_t  — local integer clock
-//   H_t  — HB vector clock
-//   P_t  — WCP-predecessor vector clock
-//   C_t  = P_t[t := N_t]   (computed on demand)
-//
-// WCP STATE PER LOCK
-//   H_ℓ, P_ℓ         — last-release clocks
-//   Acq_ℓ(t), Rel_ℓ(t) — FIFO queues (for WCP-predecessor propagation)
-//   Lr[ℓ][x], Lw[ℓ][x]  — per-variable release summaries
-//
-// WCP STATE PER VARIABLE  (stored inside VarState)
-//   Wx  — join of C_t for all writes
-//   Rx  — join of C_t for all reads
-//
-// WCP RACE CONDITIONS
-//   read(t,x):  ¬(Wx ⊑ C_t)  →  W-R
-//   write(t,x): ¬(Rx ⊑ C_t)  →  R-W
-//               ¬(Wx ⊑ C_t)  →  W-W
-//
-// SHARING ANALYSIS PURPOSE
-//   Skips the WCP slow path entirely when a variable is owned by the current
-//   thread (OWNED_READ or OWNED_WRITE state).  Entering the slow path is the
-//   only place WCP work — vector-clock joins, Lr/Lw lookups, CS-frame
-//   recording — is performed.  This matches the FT+SA design exactly.
-// =============================================================================
 
 #include <bits/stdc++.h>
 #include <pthread.h>
@@ -159,15 +115,6 @@ static inline VClock make_Ct(const VClock& P, int tid, int N) {
 
 // ── VarState: WCP variable metadata + SA owner-epoch cache ───────────────────
 //
-// The SA layer caches the last-seen owner_write_epoch and owner_read_epoch so
-// that when the variable transitions from OWNED_* to SHARED the slow path can
-// reconstruct Wx / Rx without having to re-run every historical access.
-//
-// In the WCP world Wx and Rx are full VClocks, not scalar Epochs.  So the
-// "owner cache" stores the C_t snapshot taken at the moment the owner last
-// wrote / read — exactly the value that would have been joined into Wx / Rx
-// by wcp_write_core / wcp_read_core had the slow path been called.
-//
 struct VarState {
     // WCP per-variable clocks (the "real" FT-equivalent of W/R/Rvc).
     VClock Wx;   // join of C_t for all writes seen in slow path
@@ -242,8 +189,7 @@ struct ThreadContext {
 // SECTION 4 — WCP CRITICAL-SECTION FRAME TRACKER
 //
 // Tracks which variable addresses are read / written inside each lock's CS so
-// that Lr[ℓ][x] and Lw[ℓ][x] can be updated at release time (WCP lines 7-8).
-// This is purely a WCP concept — the SA layer never touches it.
+// that Lr[ℓ][x] and Lw[ℓ][x] can be updated at release time.
 // =============================================================================
 
 struct CSFrame {
@@ -310,8 +256,6 @@ static std::atomic<int>  race_count {0};
 static ShadowEntry        shadow_table[SHADOW_SIZE];
 
 static thread_local ThreadState* tl_thread_state = nullptr;
-// Re-entrancy guard: prevents instrumented stdlib internals (e.g. allocator
-// loads/stores inside new VarState()) from recursively entering the runtime.
 static thread_local bool in_wcp_runtime = false;
 
 // Thread registry
@@ -479,14 +423,6 @@ static void do_release(ThreadState* t, LockState* ls, void* lock_addr) {
 
 // =============================================================================
 // SECTION 9 — WCP CORE: READ / WRITE  (the "slow path" called by SA)
-//
-// These operate under the var_lk + thr_lk already held by the SA slow path,
-// so all accesses to x and t fields use relaxed / direct reads.
-//
-// Unlike FT's scalar Epochs, WCP's Wx and Rx are full VClocks.  The "owner
-// cache" in VarState stores VClock snapshots (owner_write_Ct, owner_read_Ct)
-// so the SA layer can restore Wx / Rx before running the WCP check when a
-// variable transitions from OWNED_* to SHARED.
 // =============================================================================
 
 // ── wcp_read_core ─────────────────────────────────────────────────────────────
@@ -542,7 +478,7 @@ static bool wcp_write_core(void* addr, int line_no,
     // Record access in CS frames (for Lw update at release, line 8).
     csframe_record_write(t->tid, xaddr);
 
-    // Line 12: P_t ⊔= Lr[ℓ][x] ⊔ Lw[ℓ][x] for each held lock ℓ.
+    // P_t ⊔= Lr[ℓ][x] ⊔ Lw[ℓ][x] for each held lock ℓ.
     std::vector<void*> held = get_held_locks(t->tid);
     for (void* la : held) {
         LockState* ls = get_lock_state(la);
@@ -574,14 +510,6 @@ static bool wcp_write_core(void* addr, int line_no,
 
 // =============================================================================
 // SECTION 10 — SA can_reclaim
-//
-// Decides whether the current thread can re-claim exclusive ownership of a
-// variable after a SHARED-state slow-path access.  In FT+SA this checked
-// whether the thread's scalar vector clock had "seen" all previous readers
-// and writers.  In WCP+SA we do the same check but using the full VClock
-// Wx / Rx and the WCP C_t.
-//
-// Invariant: called under var_lk + thr_lk.
 // =============================================================================
 
 static bool can_reclaim(ThreadState* t, VarState* x) {
@@ -598,11 +526,6 @@ static bool can_reclaim(ThreadState* t, VarState* x) {
 
 // =============================================================================
 // SECTION 11 — SA SLOW PATHS
-//
-// Structural copy of ft_slow_read / ft_slow_write from FT+SA, with every
-// call to ft_read_core / ft_write_core replaced by wcp_read_core /
-// wcp_write_core, and every use of scalar Epochs for owner cache replaced
-// by VClock snapshots (owner_write_Ct / owner_read_Ct).
 // =============================================================================
 
 static void wcp_sa_slow_read(void* addr, int line_no,
@@ -652,13 +575,6 @@ static void wcp_sa_slow_read(void* addr, int line_no,
 
             // ── OWNED_* by a different thread: restore Wx/Rx from cache,
             //    transition to SHARED, then run WCP check. ─────────────────
-            //
-            // Why restore from cache before the WCP check?
-            //   While the variable was OWNED_* the slow path was never called,
-            //   so Wx / Rx were not updated.  The owner-cache fields hold the
-            //   C_t values that *would* have been joined into Wx / Rx had the
-            //   slow path run every time.  We must replay them now so the WCP
-            //   race check sees a complete history.
             if (ss == ShareState::OWNED_WRITE) {
                 // Previous owner was writing: Wx gets its write cache; Rx=∅.
                 x->Wx = x->owner_write_Ct;
@@ -771,11 +687,6 @@ static void wcp_sa_slow_write(void* addr, int line_no,
 extern "C" {
 
 // ── __wcp_read ────────────────────────────────────────────────────────────────
-//
-// Fast path: if hot_word says this variable is OWNED by the current thread,
-// update owner_read_Ct and return without any WCP work.
-// CAS validates that no other thread stole ownership between the load and now.
-// On CAS failure or non-owned state, fall through to wcp_sa_slow_read.
 void __wcp_read(void* addr, int line_no, char* var) {
     if (in_wcp_runtime) return;
     struct Guard { ~Guard() { in_wcp_runtime = false; } } g;

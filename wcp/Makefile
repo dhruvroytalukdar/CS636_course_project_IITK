@@ -19,11 +19,10 @@ ESCAPE_PASS_SRC := escape_instrumentation.cpp
 RUNTIME_WCP     := wcp_runtime.cpp
 RUNTIME_WCP_SA  := wcp_runtime_with_sa.cpp
 
-# TARGET_DIR     := ./benchmarks/targets/old_targets_dhruv
-TARGET_DIR     := ../benchmarks/targets/new_claude_benchmarks
-TARGET_SRC    := $(TARGET_DIR)/test2.cpp
-# TARGET_SRC    := $(TARGET_DIR)/test2.cpp
-# TARGET_SRC    := $(TARGET_DIR)/test_efficiency.cpp
+TARGET_DIR       := ../benchmarks/targets/new_targets_dhruv/new
+TARGET_SRC       := $(TARGET_DIR)/b4.cpp
+# TARGET_SRC     := $(TARGET_DIR)/test2.cpp
+# TARGET_SRC     := $(TARGET_DIR)/test_efficiency.cpp
 
 BUILD_DIR       := build_wcp
 TARGET_NAME     := $(notdir $(basename $(TARGET_SRC)))

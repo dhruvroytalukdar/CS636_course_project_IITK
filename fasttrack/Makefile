@@ -21,7 +21,7 @@ TARGET_DIR     := ../benchmarks/targets/new_targets_dhruv
 RUNTIME_FT     := fasttrack_runtime.cpp
 RUNTIME_SA     := fasttrack_runtime_with_sa.cpp
 
-TARGET_SRC     := $(TARGET_DIR)/new/b4.cpp
+TARGET_SRC     := $(TARGET_DIR)/new/b5.cpp
 # TARGET_SRC     := $(TARGET_DIR)/cases.c
 # TARGET_SRC     := ../benchmarks/targets/src/test.cpp
 # TARGET_SRC     := $(TARGET_DIR)/no_sharing.cpp
@@ -41,10 +41,6 @@ TARGET_LL      := $(BUILD_DIR)/$(TARGET_NAME).ll
 # ──────────────────────────────────────────────────────────────────
 PLUGIN         := $(BUILD_DIR)/llvmpass.so
 ESCAPE_PASS_OBJ := $(BUILD_DIR)/escape_instpass.so
-
-# TARGET_BC      := $(BUILD_DIR)/efficiency.bc
-# TARGET_INST_BC := $(BUILD_DIR)/efficiency_inst.bc
-# TARGET_LL      := $(BUILD_DIR)/$(basename $(TARGET_SRC)).ll
 
 RUNTIME_FT_OBJ    := $(BUILD_DIR)/runtime_ft.o
 RUNTIME_SA_OBJ    := $(BUILD_DIR)/runtime_sa.o
