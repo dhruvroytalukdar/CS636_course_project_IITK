@@ -1,7 +1,3 @@
-// Adds a flow-sensitive thread-escape analysis (adapted from Falcon's
-// FlowSensitiveEA, LLVM Dev Meeting 2020) so that loads/stores to provably
-// thread-local memory are NOT instrumented — reducing runtime overhead while
-// keeping the analysis sound (if unsure -  instrument).
 #include "llvm/IR/Instructions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/InstrTypes.h"
@@ -31,19 +27,7 @@ using namespace llvm;
 
 
 
-//llvm manages inter procedural using call graph 
-//and intra procedural using CFG,(basic blocks)
-// The hardest conceptual leap to make here is this: There are no edges across functions.
-// This new analysis is strictly Intra-Procedural. It treats every single function as an isolated universe
-// . It does not track data across function boundaries at all.
-//
-// We track which heap/stack allocations are provably confined to a single
-// thread ("thread-local"). Loads and stores to thread-local memory are safe
-// to skip. Everything else gets instrumented.
-//
-// Escape lattice (monotone — only moves up):
-//   ThreadLocal  ⊑  ThreadEscaped
-//
+//does not track data across function boundaries at all.
 // An allocation escapes to another thread when:
 //   (a) Its address is passed as the `arg` to pthread_create.
 //   (b) Its address is stored into a ThreadEscaped object (transitive escape).
@@ -55,7 +39,6 @@ using namespace llvm;
 // and only propagate escape transitively if the container later escapes.
 // This handles unescaped object graphs (linked lists, etc.) that naive
 // CaptureTracking conservatively over-escapes.
-//===----------------------------------------------------------------------===//
 
 
 
@@ -73,7 +56,7 @@ struct AllocInfo {
     
 
     //merge two allocations. if any one shared then shared.
-    ////now this case was little tricky for me as i realised a allocation can be shared in two different 
+    ////a allocation can be shared in two different 
     ///basic blocks or two paths and one of the path can modify the state of the allocation so if these two 
     ///paths merge later than update has to be made. 
     ///but wont this introduce memory overhead since 100 paths will each have copies of allocations at the point
@@ -90,6 +73,8 @@ struct AllocInfo {
 struct BlockState {
     DenseMap<Value *, AllocInfo> Allocs;   // base alloc  info
     DenseMap<Value *, Value *>   Aliases;  // derived ptr  base alloc
+   // Every entry in Aliases is a pointer that we know with 100% certainty points into a 
+   //pecific tracked (unescaped) allocation.
 
     // Follow alias chain to find the base allocation for V.
     Value *baseOf(Value *V) const {
@@ -121,7 +106,6 @@ struct BlockState {
         }
         // remainder tracked allocation means, we are confident these things have not yet
         // escaped and are local, anything outside it, instrument it.
-        //
         // PROVE A POINTER MUST BE THREAD LOCAL.
         // take intersection of the aliases. 
         // a alias get created inside a BB, it gets out of scope unless it is passed through a phinode.
@@ -136,16 +120,13 @@ struct BlockState {
             Aliases.try_emplace(Alias, Base);
     }
 
-    // Simple equality check (used to detect fixed-point convergence).
+    //simple equality check (used to detect fixed-point convergence)
     bool sameSize(const BlockState &O) const {
         return Allocs.size() == O.Allocs.size() &&
                Aliases.size() == O.Aliases.size();
     }
 };
 
-// ThreadEscapeAnalysis — intra-procedural, flow-sensitive
-// attention on "intra-procedural"
-// consider functions as black boxes, conservative === sound.
 class ThreadEscapeAnalysis {
 private:
     Function      &F;
@@ -160,15 +141,7 @@ private:
 public:
     ThreadEscapeAnalysis(Function &F, const DataLayout &DL) : F(F), DL(DL) {}
     
-
-    ////ONE IMPORTANT THING IS THAT THE REASON THIS ANALYSIS IN INTRA PROCEDURAL IS 
-    ///BECAUSE THE PREDECESSORS AND SUCCESSORS ONLY RETURN BB IN THE SAME FUNCTION NOT 
-    ///OUTSIDE
     void run() {
-        //process all basic blocks for a function. 
-
-
-        // RPO traversal — processes dominators before dominated blocks.
         // a post order DFS traversal then reverse it
         // start from top of the tree.
         SmallVector<BasicBlock *, 32> RPO;
@@ -177,9 +150,7 @@ public:
 
         SmallPtrSet<BasicBlock *, 32> InWorklist(RPO.begin(), RPO.end());
         SmallVector<BasicBlock *, 32> Worklist(RPO.begin(), RPO.end());
-        //a simple proof why this will converge can be threadlocal subsets threadescape 
-        //threadescape only changes from false -> true, points to only grow, monotonic - finite - converges
-        //
+        
         while (!Worklist.empty()) {
             BasicBlock *BB = Worklist.front();
             Worklist.erase(Worklist.begin());
@@ -227,7 +198,6 @@ public:
         }
 // Walk all block out-states and record the worst escape state seen for
     // each allocation across all program points.
-
         consolidate();
     }
 
@@ -246,8 +216,6 @@ public:
 
 private:
     // Instruction handlers  -  model how each instruction affects the state
-    //
-
     void handleInst(Instruction &I, BlockState &S) {
         if (auto *AI = dyn_cast<AllocaInst>(&I)) {
             // Stack alloc - start as thread-local.
@@ -448,12 +416,11 @@ private:
                 }
             }
         }
-        // Unknown load result — don't add a spurious alias.
     }
 
     // Escape `Base` (and everything transitively reachable from it via
     // the points-to graph).  Guards against cycles with the Escaped flag.
-    // this is the heart of escape propogation. remember how pointsto graphy was created.
+    //  escape propogation..
     void escapeBase(Value *Base, BlockState &S) {
         auto It = S.Allocs.find(Base);
         if (It == S.Allocs.end()) return;
@@ -504,18 +471,14 @@ private:
     }
 };
 
-//===----------------------------------------------------------------------===//
-// Section 2 — The pass
-//===----------------------------------------------------------------------===//
-
+//the pass
 struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
         LLVMContext &Ctx = M.getContext();
         const DataLayout &DL = M.getDataLayout();
 
-        // ---- Declare hooks (same signatures as your base pass) ----
         Type *VoidTy = Type::getVoidTy(Ctx);
-        Type *PtrTy  = PointerType::getUnqual(Ctx); // opaque ptr (LLVM 15+)
+        Type *PtrTy  = PointerType::getUnqual(Ctx); 
 #if RUNTIME == 3
         FunctionCallee LogLoad   = M.getOrInsertFunction("__log_load",    VoidTy, PtrTy);
         FunctionCallee LogStore  = M.getOrInsertFunction("__log_store",   VoidTy, PtrTy);
@@ -589,7 +552,6 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
             VoidPtrTy
         );
 
-        // ---- pthread_create wrapper ----
         FunctionCallee ThreadWrapper =
             M.getOrInsertFunction("thread_wrapper",
                                   VoidPtrTy, VoidPtrTy);
@@ -602,11 +564,11 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
         for (Function &F : M.functions()) {
             if (F.isDeclaration()) continue;
 
-            // Phase 1: run escape analysis for this function.
+            //run escape analysis for this function.
             ThreadEscapeAnalysis EA(F, DL);
             EA.run();
 
-            // Phase 2: collect instructions to instrument.
+            //collect instructions to instrument.
             // (Collect first, then insert — avoids iterator invalidation.)
             SmallVector<LoadInst  *, 64> Loads;
             SmallVector<StoreInst *, 64> Stores;
@@ -862,11 +824,8 @@ struct RaceDetectPass : public PassInfoMixin<RaceDetectPass> {
     
     }
 };
-} // anonymous namespace
+}
 
-//===----------------------------------------------------------------------===//
-// Plugin registration — unchanged from your base pass
-//===----------------------------------------------------------------------===//
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
     return {
