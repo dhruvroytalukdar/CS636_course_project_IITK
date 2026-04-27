@@ -1,23 +1,27 @@
-# WCP Predictive Data Race Detector - Milestone 1
-
-This repository contains the foundational LLVM pass and runtime infrastructure for our WCP Predictive Data Race Detector. 
-
-Currently, the project successfully demonstrates a dynamic analysis pipeline by intercepting memory `load` and `store` instructions via an LLVM compiler pass and redirecting them to a custom runtime monitoring library.
+# Making Data Race Detection Efficient: Dynamic and Static Analysis
 
 ## Project Structure
-* `InstrumentMemory.cpp`: The LLVM Pass (New Pass Manager) that injects callbacks before memory operations.
-* `wcp_runtime.cpp`: The runtime library containing callbacks. (Future home of WCP Vector Clock logic).
-* `target.cpp`: A dummy C++ program used to verify instrumentation.
-* `Makefile`: Build system to compile the pass, emit IR, instrument, and link the final executable.
+* `/fasttrack`: Contains implementation for FastTrack, FastTrack with sharing and FastTrack with escape analysis.
+* `/benchmarks`: Contains the target programs to be instrumented and tested with race detector.
+* `/wcp`: Contains implementation for plain WCP, WCP with static analysis, and WCP with escape analysis.
 
 ## How to Build and Run
 
-1. **Prerequisites:** Ensure `clang`, `clang++`, `opt`, and `llvm-config` are installed and in your system's PATH (Tested on LLVM 18+).
-2. **Compile everything:**
+1. **Prerequisites:** Ensure `clang`, `clang++`, `opt`, and `llvm-config` are installed and in your system's PATH (Tested on LLVM 20+).
+2. **Navigate to the desired directory:**
+   - For FastTrack: 
+     ```bash
+     cd fasttrack
+     ```
+   - For WCP:
+     ```bash
+     cd wcp
+     ```
+3. **Get helper message** on compilation and execution:
    ```bash
-   make
+   make help
    ```
-3. **Run the instrumented target:**
+3. **Compile and run all four version (plain, plain with sharing analysis, plain with escape analysis, and plain with sharing and escape analysis):**
    ```bash
    make run
    ```
